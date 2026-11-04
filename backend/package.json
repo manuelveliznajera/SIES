@@ -5,6 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "prebuild": "npm run migrate",
     "build": "tsc",
     "start": "node dist/server.js",
     "deploy": "npm run migrate && npm run build",

@@ -22,7 +22,7 @@ En `backend/`:
 
 ```bash
 npm run dev          # tsx watch src/server.ts; puerto default 3001
-npm run build        # tsc -> dist
+npm run build        # prebuild ejecuta migraciones; luego tsc -> dist
 npm start            # node dist/server.js
 npm run typecheck    # tsc --noEmit
 npm run migrate      # node-pg-migrate --migrations-dir database/migrations up
