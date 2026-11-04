@@ -9,7 +9,7 @@
 | Pregunta u opción de encuesta | UI/handlers en `App.tsx`; `surveysApi.ts`; `surveys.validators.ts`; `surveys.controller.ts`; `surveys.service.ts`; `survey_questions`/`question_options`. |
 | Endpoint nuevo o cambio de HTTP | `backend/src/modules/<módulo>/<módulo>.routes.ts`; `app.ts` para registrar un router nuevo; controller/validator/service. Luego frontend API client. |
 | Autorización | Middleware `authenticate.ts` y `authorize`; router asociado. Revisar también filtrado de datos en service y UI por rol. |
-| Consulta SQL | Servicio bajo `backend/src/modules/*/*.service.ts`; pool común `backend/src/database/pool.ts`; schema fuente en `database/migrations/*.sql`. |
+| Consulta SQL | Servicio bajo `backend/src/modules/*/*.service.ts`; pool común `backend/src/database/pool.ts`; schema fuente en `backend/database/migrations/*.sql`. |
 | Comunidad/asignación | `assignmentsApi.ts`, sección `supervisors` de `App.tsx`; assignments route/service; `SurveysService.list/getById/saveAssignments`; migraciones 006 y 013. |
 | Entrevista/GPS/respuestas | Terminal y `handleSaveInterview`/`handleCaptureGps` en `App.tsx`; `interviewsApi.ts`; `interviews.validators.ts`, controller/service; migración 007. |
 | Gráficas/estadísticas | Vistas dashboard y `currentSurveyInterviews` en `App.tsx`; confirmar agregación frontend y fuente real. |

@@ -13,7 +13,7 @@ Los comandos de desarrollo y build siguientes están definidos en `package.json`
 1. Instalar en las carpetas `frontend` y `backend` con `npm ci` para respetar lockfiles.
 2. Configurar `backend/.env` desde la plantilla `.env.example` ubicada en raíz. `env.ts` carga `.env` desde el `process.cwd()`, así que iniciar los comandos backend desde `backend/` como indica README.
 3. Definir como mínimo `DATABASE_URL`, `JWT_SECRET` y `COOKIE_SECRET`. Revisar `backend/src/config/env.ts` y [seguridad](07-seguridad.md); no copiar secretos en documentos.
-4. Configurar la base PostgreSQL y ejecutar `npm run migrate` desde `backend/` únicamente en el entorno autorizado. La documentación de esta tarea no ejecutó migraciones ni verificó estado desplegado.
+4. Configurar la base PostgreSQL y ejecutar `npm run migrate` desde `backend/` únicamente en el entorno autorizado. Las migraciones están dentro de `backend/database/migrations` para que el paquete del backend pueda desplegarse de forma independiente; el comando precarga `.env` con `dotenv`.
 5. Según README, `npm run seed:admin` crea el administrador inicial desde variables `SEED_ADMIN_*`, solo si aún no hay admin. No hay password admin por defecto confirmado por las migraciones actuales.
 
 ## Comandos reales
@@ -25,7 +25,7 @@ npm run dev          # tsx watch src/server.ts; puerto default 3001
 npm run build        # tsc -> dist
 npm start            # node dist/server.js
 npm run typecheck    # tsc --noEmit
-npm run migrate      # node-pg-migrate --migrations-dir ../database/migrations up
+npm run migrate      # node-pg-migrate --migrations-dir database/migrations up
 npm run migrate:down
 npm run seed:admin
 npm run reset:admin-password

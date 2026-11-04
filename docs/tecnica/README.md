@@ -18,7 +18,7 @@ Esta guía describe la implementación que se encontró en el repositorio `Encue
 
 ## Alcance y límites de verificación
 
-- Se inspeccionó el código en `frontend/src`, `backend/src`, `database/migrations`, manifests, lockfiles y configuración versionada.
+- Se inspeccionó el código en `frontend/src`, `backend/src`, `backend/database/migrations`, manifests, lockfiles y configuración versionada.
 - Se revisaron rutas de API, validadores, controladores, servicios SQL, middleware, flujos de formulario, configuración y dependencias bloqueadas.
 - El motor configurado es PostgreSQL mediante `DATABASE_URL` y la librería `pg`. No se consultó el servidor desplegado; nombre de base de datos, host, puerto, versión activa, extensiones instaladas y estado de migraciones dependen del entorno.
 - No se encontraron archivos Docker/Compose, OpenAPI/Swagger, manifiesto/service worker de PWA ni pruebas automatizadas en el árbol de `tests/` (el directorio está vacío). El script npm de pruebas no constituye evidencia de pruebas existentes.

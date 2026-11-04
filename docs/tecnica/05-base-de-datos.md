@@ -7,7 +7,7 @@
 - Formato declarado en `.env.example`: URL `postgresql://usuario:contraseña@host:puerto/base`. El host, puerto, nombre lógico y credenciales reales dependen de `backend/.env`/entorno y no se inspeccionaron ni publican.
 - Driver y acceso: `pg`, consultas SQL parametrizadas (`query`) y transacciones explícitas (`withTransaction`). No hay ORM ni `schema.prisma`.
 - El pool tiene defaults de 2–10 conexiones, timeout de conexión 5 s e idle timeout 30 s. Startup llama `testConnection()`.
-- Migraciones existentes: `database/migrations/001...013_*.sql`. Seed de roles y tipos en migraciones; la cuenta inicial debe crearse con `npm run seed:admin` y variables privadas.
+- Migraciones existentes: `backend/database/migrations/001...014_*.sql`. Seed de roles y tipos en migraciones; la cuenta inicial debe crearse con `npm run seed:admin` y variables privadas.
 
 ## Modelo entidad-relación
 
@@ -89,7 +89,7 @@ Triggers `updated_at` invocan `update_updated_at_column()` en users, departments
 
 ## Acceso por módulo y persistencia
 
-`AuthService` y `UsersService` trabajan con usuarios/roles/tokens; `SurveysService` mantiene versiones, preguntas, opciones, catálogo geográfico y asignaciones; `AssignmentsService` inserta/actualiza comunidades/asignaciones; `InterviewsService` inserta entrevistas, answers y selecciones, y lee joins para dashboard/mapa. SQL y relaciones exactos se localizan en `database/migrations/*.sql` y `backend/src/modules/*/*.service.ts`.
+`AuthService` y `UsersService` trabajan con usuarios/roles/tokens; `SurveysService` mantiene versiones, preguntas, opciones, catálogo geográfico y asignaciones; `AssignmentsService` inserta/actualiza comunidades/asignaciones; `InterviewsService` inserta entrevistas, answers y selecciones, y lee joins para dashboard/mapa. SQL y relaciones exactos se localizan en `backend/database/migrations/*.sql` y `backend/src/modules/*/*.service.ts`.
 
 ## Observaciones para validar
 

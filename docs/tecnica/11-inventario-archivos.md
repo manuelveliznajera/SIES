@@ -11,7 +11,7 @@ Inventario de fuente y configuración revisada; excluye `node_modules`, `dist`, 
 | `.gitignore` | Ignora logs, dependencias, build y archivos locales de editor. |
 | `frontend/` | Cliente React/Vite. |
 | `backend/` | API Node/Express. Contiene `backend/.env` local no inspeccionado. |
-| `database/migrations/` | DDL y seeds SQL, migraciones 001–013. |
+| `backend/database/migrations/` | DDL y seeds SQL, migraciones 001–014; incluidas con el backend para permitir despliegue independiente. |
 | `tests/` | Directorio vacío en el inventario inspeccionado. |
 | `docs/tecnica/` | Esta documentación. |
 
@@ -53,18 +53,19 @@ Inventario de fuente y configuración revisada; excluye `node_modules`, `dist`, 
 
 | Ruta | Contenido |
 |---|---|
-| `database/migrations/001_create_users_roles.sql` | Usuarios, roles, user_roles, refresh_tokens, helper updated_at. |
-| `002_create_geography.sql` | Departments, municipalities, communities. |
-| `003_create_enumerators.sql` | Perfil de encuestador. |
-| `004_create_elections.sql` | Tipos de elección, elecciones, partidos, candidatos. |
-| `005_create_surveys.sql` | Encuestas, versiones, preguntas y opciones. |
-| `006_create_assignments.sql` | Enum y asignaciones por survey/community/enumerator. |
-| `007_create_interviews.sql` | Entrevistados, entrevistas, respuestas y selecciones. |
-| `008_create_sync_audit.sql` | Sync operations/logs y audit logs. |
-| `009_seed_default_admin.sql`, `010_remove_legacy_default_admin.sql` | No crean credenciales activas por defecto; la cuenta se provisiona por script seguro. |
-| `011_users_module_fields.sql` | Phone y rol SUPERVISOR. |
-| `012_survey_option_colors.sql` | Color de opción de encuesta. |
-| `013_survey_assignment_community_name.sql` | Alias de comunidad dentro de asignación/estudio. |
+| `backend/database/migrations/001_create_users_roles.sql` | Usuarios, roles, user_roles, refresh_tokens, helper updated_at. |
+| `backend/database/migrations/002_create_geography.sql` | Departments, municipalities, communities. |
+| `backend/database/migrations/003_create_enumerators.sql` | Perfil de encuestador. |
+| `backend/database/migrations/004_create_elections.sql` | Tipos de elección, elecciones, partidos, candidatos. |
+| `backend/database/migrations/005_create_surveys.sql` | Encuestas, versiones, preguntas y opciones. |
+| `backend/database/migrations/006_create_assignments.sql` | Enum y asignaciones por survey/community/enumerator. |
+| `backend/database/migrations/007_create_interviews.sql` | Entrevistados, entrevistas, respuestas y selecciones. |
+| `backend/database/migrations/008_create_sync_audit.sql` | Sync operations/logs y audit logs. |
+| `backend/database/migrations/009_seed_default_admin.sql`, `backend/database/migrations/010_remove_legacy_default_admin.sql` | No crean credenciales activas por defecto; la cuenta se provisiona por script seguro. |
+| `backend/database/migrations/011_users_module_fields.sql` | Phone y rol SUPERVISOR. |
+| `backend/database/migrations/012_survey_option_colors.sql` | Color de opción de encuesta. |
+| `backend/database/migrations/013_survey_assignment_community_name.sql` | Alias de comunidad dentro de asignación/estudio. |
+| `backend/database/migrations/014_admin_observability.sql` | Bitácora y errores de aplicación. |
 
 ## Archivos/configuración no encontrados
 
