@@ -7,6 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "prebuild": "npm run migrate",
     "build": "tsc",
+    "postbuild": "node -e \"if (process.env.RUN_ADMIN_SEED === 'true') require('./dist/database/seedAdmin.js')\"",
     "start": "node dist/server.js",
     "deploy": "npm run migrate && npm run build",
     "migrate": "node -r dotenv/config node_modules/node-pg-migrate/bin/node-pg-migrate.js --migrations-dir database/migrations up",
