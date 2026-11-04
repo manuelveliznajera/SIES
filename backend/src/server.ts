@@ -2,6 +2,7 @@ import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './utils/logger';
 import { testConnection } from './database/pool';
+import { writeApplicationError } from './services/observability';
 
 async function bootstrap() {
   // Verificar conexión a la base de datos antes de aceptar tráfico
@@ -43,6 +44,12 @@ async function bootstrap() {
     logger.error('Promesa rechazada no manejada', {
       reason: reason instanceof Error ? reason.message : String(reason),
     });
+    void writeApplicationError({
+      source: 'backend',
+      message: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+      details: { scope: 'process', event: 'unhandledRejection' },
+    });
   });
 
   process.on('uncaughtException', (err) => {
@@ -50,7 +57,17 @@ async function bootstrap() {
       error: err.message,
       stack: err.stack,
     });
-    process.exit(1);
+    const exitTimer = setTimeout(() => process.exit(1), 2000);
+    exitTimer.unref();
+    void writeApplicationError({
+      source: 'backend',
+      message: err.message,
+      stack: err.stack,
+      details: { scope: 'process', event: 'uncaughtException' },
+    }).finally(() => {
+      clearTimeout(exitTimer);
+      process.exit(1);
+    });
   });
 }
 

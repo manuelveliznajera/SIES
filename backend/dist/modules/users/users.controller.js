@@ -9,6 +9,7 @@ const zod_1 = require("zod");
 const logger_1 = require("../../utils/logger");
 const users_validators_1 = require("./users.validators");
 const users_service_1 = require("./users.service");
+const observability_1 = require("../../services/observability");
 function sendError(error, next, res) {
     if (error instanceof zod_1.ZodError) {
         res.status(400).json({
@@ -41,6 +42,12 @@ async function createUser(req, res, next) {
     try {
         const input = users_validators_1.createUserSchema.parse(req.body);
         const user = await users_service_1.usersService.create(input);
+        await (0, observability_1.writeAuditEvent)(req, {
+            action: 'user.created',
+            entityType: 'user',
+            entityId: user.id,
+            changes: { username: user.username, fullName: user.fullName, role: user.role },
+        });
         res.status(201).json({ success: true, user });
     }
     catch (error) {
@@ -64,6 +71,17 @@ async function updateUser(req, res, next) {
             res.status(404).json({ success: false, message: 'Usuario no encontrado.', code: 'USER_NOT_FOUND' });
             return;
         }
+        await (0, observability_1.writeAuditEvent)(req, {
+            action: 'user.updated',
+            entityType: 'user',
+            entityId: user.id,
+            changes: {
+                username: user.username,
+                fullName: user.fullName,
+                role: user.role,
+                passwordChanged: Boolean(input.password),
+            },
+        });
         res.status(200).json({ success: true, user });
     }
     catch (error) {
@@ -86,6 +104,12 @@ async function deactivateUser(req, res, next) {
             res.status(404).json({ success: false, message: 'Usuario no encontrado.', code: 'USER_NOT_FOUND' });
             return;
         }
+        await (0, observability_1.writeAuditEvent)(req, {
+            action: 'user.deactivated',
+            entityType: 'user',
+            entityId: user.id,
+            changes: { username: user.username },
+        });
         res.status(200).json({ success: true, user });
     }
     catch (error) {
@@ -103,6 +127,12 @@ async function activateUser(req, res, next) {
             res.status(404).json({ success: false, message: 'Usuario no encontrado.', code: 'USER_NOT_FOUND' });
             return;
         }
+        await (0, observability_1.writeAuditEvent)(req, {
+            action: 'user.activated',
+            entityType: 'user',
+            entityId: user.id,
+            changes: { username: user.username },
+        });
         res.status(200).json({ success: true, user });
     }
     catch (error) {

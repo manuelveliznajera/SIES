@@ -1,4 +1,5 @@
 import type { SurveyInput } from './surveys.validators';
+type SurveyStatus = 'active' | 'draft' | 'completed' | 'archived';
 type QuestionType = SurveyInput['questions'][number]['type'];
 export interface SurveyRecord {
     id: string;
@@ -19,7 +20,7 @@ export interface SurveyRecord {
     startDate: string;
     endDate: string;
     targetSample: number;
-    status: 'active' | 'draft' | 'completed';
+    status: SurveyStatus;
     questions: Array<{
         id: string;
         title: string;
@@ -41,6 +42,7 @@ export declare class SurveysService {
     create(input: SurveyInput, userId: string): Promise<SurveyRecord>;
     update(surveyId: string, input: SurveyInput, userId: string): Promise<SurveyRecord | null>;
     archive(surveyId: string): Promise<boolean>;
+    restore(surveyId: string): Promise<SurveyRecord | null>;
     private ensureMunicipality;
     private saveVersion;
     private saveAssignments;

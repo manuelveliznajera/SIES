@@ -16,7 +16,7 @@ const surveySchema = z.object({
   startDate: z.string(),
   endDate: z.string(),
   targetSample: z.number(),
-  status: z.enum(['active', 'draft', 'completed']),
+  status: z.enum(['active', 'draft', 'completed', 'archived']),
   questions: z.array(z.object({
     id: z.string(),
     title: z.string(),
@@ -155,4 +155,12 @@ export async function archiveSurvey(id: string): Promise<void> {
     method: 'DELETE',
   });
   await parseResponse(response, successResponseSchema);
+}
+
+export async function restoreSurvey(id: string): Promise<z.infer<typeof surveySchema>> {
+  const response = await authenticatedFetch(`${apiBase}/surveys/${encodeURIComponent(id)}/restore`, {
+    method: 'PATCH',
+  });
+  const payload = await parseResponse(response, surveyResponseSchema);
+  return payload.survey;
 }

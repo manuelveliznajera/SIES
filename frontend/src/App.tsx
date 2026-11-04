@@ -19,9 +19,18 @@ import {
   archiveSurvey,
   createSurvey as createSurveyRequest,
   listSurveys,
+  restoreSurvey as restoreSurveyRequest,
   updateSurvey as updateSurveyRequest,
 } from './surveysApi';
 import { createInterview as createInterviewRequest, listInterviews } from './interviewsApi';
+import { getPendingInterviews, removePendingInterview, savePendingInterview } from './offlineInterviewsDb';
+import {
+  listApplicationErrors,
+  listAuditEvents,
+  reportFrontendError,
+  type ApplicationErrorRecord,
+  type AuditEventRecord,
+} from './adminLogsApi';
 import { createCommunityAssignment, updateCommunityAssignment } from './assignmentsApi';
 import {
   Vote,
@@ -45,6 +54,7 @@ import {
   CheckSquare,
   Sparkles,
   FileText,
+  Bell,
   Printer,
   X,
   UserCheck,
@@ -54,7 +64,8 @@ import {
   UserPlus,
   Pencil,
   LogOut,
-  Menu
+  Menu,
+  Bug
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -68,6 +79,16 @@ import {
   Cell,
   CartesianGrid
 } from 'recharts';
+
+const formatGuatemalaDateTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('es-GT', {
+    timeZone: 'America/Guatemala',
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(date);
+};
 
 // ── GEOGRAFÍA DE GUATEMALA (DEPARTAMENTOS Y MUNICIPIOS) ──
 export const GUATEMALA_GEOGRAPHY: Record<string, string[]> = {
@@ -258,7 +279,7 @@ export interface FullSurvey {
   startDate: string;
   endDate: string;
   targetSample: number;
-  status: 'active' | 'draft' | 'completed';
+  status: 'active' | 'draft' | 'completed' | 'archived';
   questions: SurveyQuestion[];
   assignedEnumerators: string[];
   collectedSample: number;
@@ -293,6 +314,7 @@ export interface InterviewRecord {
   surveyTitle: string;
   enumeratorAlias: string;  // Ej: "User1"
   surveyNumber: number;     // Ej: 1, 2...
+  enumeratorName: string;
   department: string;
   municipality: string;
   community: string;
@@ -331,7 +353,13 @@ function FitMapToInterviews({ records }: { records: InterviewRecord[] }) {
 
 export function App() {
   // Pestaña activa
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'builder' | 'survey' | 'map' | 'surveys_list' | 'supervisors' | 'users'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'builder' | 'survey' | 'map' | 'surveys_list' | 'supervisors' | 'users' | 'admin_config'>('dashboard');
+  const [adminLogsTab, setAdminLogsTab] = useState<'audit' | 'errors'>('audit');
+  const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
+  const [applicationErrors, setApplicationErrors] = useState<ApplicationErrorRecord[]>([]);
+  const [adminLogsLoading, setAdminLogsLoading] = useState(false);
+  const [adminLogsError, setAdminLogsError] = useState<string | null>(null);
+  const [adminLogsSearch, setAdminLogsSearch] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Rol del usuario activo en la app
@@ -375,7 +403,7 @@ export function App() {
   const [userRoleFilter, setUserRoleFilter] = useState<string>('all');
 
   // Estado de conectividad
-  const [isOnline, setIsOnline] = useState<boolean>(true);
+  const [isOnline, setIsOnline] = useState<boolean>(() => navigator.onLine);
 
   // Alias del encuestador activo en el dispositivo (ej. User1, User2...)
   const [currentEnumeratorAlias, setCurrentEnumeratorAlias] = useState<string>('User1');
@@ -410,6 +438,39 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!authenticatedSession) return;
+    const handleWindowError = (event: ErrorEvent) => {
+      if (!event.message && !event.error) return;
+      void reportFrontendError({
+        message: event.message || 'Error de ejecución en el frontend.',
+        ...(event.error instanceof Error && event.error.stack ? { stack: event.error.stack } : {}),
+        path: window.location.pathname,
+        details: {
+          file: event.filename?.slice(0, 500),
+          line: event.lineno,
+          column: event.colno,
+        },
+      });
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      void reportFrontendError({
+        message: reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : 'Promesa rechazada sin manejar.',
+        ...(reason instanceof Error && reason.stack ? { stack: reason.stack } : {}),
+        path: window.location.pathname,
+        details: { type: 'unhandledrejection' },
+      });
+    };
+
+    window.addEventListener('error', handleWindowError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', handleWindowError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, [authenticatedSession]);
+
+  useEffect(() => {
     if (currentUserRole !== 'admin' || !authenticatedSession) return;
     let isCurrent = true;
     setIsUsersLoading(true);
@@ -434,13 +495,25 @@ export function App() {
   }, [currentUserRole, authenticatedSession]);
 
   const [dashboardChartType, setDashboardChartType] = useState<'bar' | 'pie'>('bar');
+  const [newInterviewNotificationId, setNewInterviewNotificationId] = useState<string | null>(null);
 
   // ── BASE DE DATOS DE ENCUESTAS (CON COMUNIDADES ASIGNADAS POR ADMIN) ──
   const [surveys, setSurveys] = useState<FullSurvey[]>([]);
 
   // Encuesta seleccionada
   const [selectedSurveyId, setSelectedSurveyId] = useState<string>('');
-  const currentSurvey = surveys.find((s) => s.id === selectedSurveyId) || surveys[0] || EMPTY_SURVEY;
+  const activeSurveys = useMemo(() => surveys.filter((survey) => survey.status === 'active'), [surveys]);
+  const currentSurvey = activeSurveys.find((survey) => survey.id === selectedSurveyId) || activeSurveys[0] || EMPTY_SURVEY;
+
+  useEffect(() => {
+    if (activeSurveys.length === 0) {
+      if (selectedSurveyId) setSelectedSurveyId('');
+      return;
+    }
+    if (!activeSurveys.some((survey) => survey.id === selectedSurveyId)) {
+      setSelectedSurveyId(activeSurveys[0].id);
+    }
+  }, [activeSurveys, selectedSurveyId]);
 
   useEffect(() => {
     setMobileMenuOpen(false);
@@ -453,14 +526,15 @@ export function App() {
     void listSurveys()
       .then((loadedSurveys) => {
         if (!isCurrent) return;
+        const activeStudies = loadedSurveys.filter((survey) => survey.status === 'active');
         setSurveys(loadedSurveys);
-        setAssignmentSurveyId((currentId) => loadedSurveys.some((survey) => survey.id === currentId)
+        setAssignmentSurveyId((currentId) => activeStudies.some((survey) => survey.id === currentId)
           ? currentId
-          : loadedSurveys[0]?.id ?? '');
+          : activeStudies[0]?.id ?? '');
         setSelectedSurveyId((currentId) =>
-          loadedSurveys.some((survey) => survey.id === currentId)
+          activeStudies.some((survey) => survey.id === currentId)
             ? currentId
-            : loadedSurveys[0]?.id ?? ''
+            : activeStudies[0]?.id ?? ''
         );
         setSurveyApiError(null);
       })
@@ -480,13 +554,129 @@ export function App() {
   }, [authenticatedSession]);
 
   useEffect(() => {
+    if (!authenticatedSession || !['admin', 'supervisor'].includes(currentUserRole)) return;
+
+    let source: EventSource | null = null;
+    let retryTimer: number | undefined;
+    let disposed = false;
+    const eventsUrl = `${import.meta.env.VITE_API_URL ?? ''}/api/v1/surveys/events`;
+
+    const connect = () => {
+      if (disposed || !navigator.onLine) return;
+      source = new EventSource(eventsUrl, { withCredentials: true });
+      source.addEventListener('survey.created', (message) => {
+        let event: { title?: string; municipality?: string } = {};
+        try {
+          event = JSON.parse((message as MessageEvent<string>).data) as typeof event;
+        } catch {
+          // Ignorar notificaciones mal formadas y mantener la conexión abierta.
+        }
+
+        void listSurveys()
+          .then((loadedSurveys) => {
+            setSurveys(loadedSurveys);
+            setAssignmentSurveyId((currentId) => loadedSurveys.some((survey) => survey.id === currentId)
+              ? currentId
+              : loadedSurveys[0]?.id ?? '');
+            setSelectedSurveyId((currentId) => loadedSurveys.some((survey) => survey.id === currentId)
+              ? currentId
+              : loadedSurveys[0]?.id ?? '');
+            setSurveyApiError(null);
+          })
+          .catch((error: unknown) => {
+            setSurveyApiError(error instanceof Error ? error.message : 'No se pudo actualizar la lista de encuestas.');
+          });
+
+        const toast = Swal.mixin({
+          toast: true,
+          position: 'top-end',
+          showConfirmButton: false,
+          timer: 4500,
+          timerProgressBar: true,
+        });
+        void toast.fire({
+          icon: 'info',
+          title: 'Nueva encuesta creada',
+          text: [event.title, event.municipality].filter(Boolean).join(' · '),
+        });
+      });
+
+      source.addEventListener('interview.created', (message) => {
+        let folio = '';
+        try {
+          const event = JSON.parse((message as MessageEvent<string>).data) as { folio?: string };
+          folio = event.folio ?? '';
+        } catch {
+          // La actualización de datos sigue aunque el detalle del evento no pueda leerse.
+        }
+        if (folio) {
+          setNewInterviewNotificationId(folio);
+          window.setTimeout(() => {
+            setNewInterviewNotificationId((currentId) => currentId === folio ? null : currentId);
+          }, 2400);
+        }
+
+        void Promise.all([listInterviews(), getPendingInterviews()])
+          .then(([loadedInterviews, pending]) => {
+            const pendingRecords = pending.map((item) => item.record);
+            const pendingIds = new Set(pendingRecords.map((record) => record.id));
+            setInterviews([...pendingRecords, ...loadedInterviews.filter((record) => !pendingIds.has(record.id))]);
+            setInterviewsApiError(null);
+          })
+          .catch((error: unknown) => {
+            setInterviewsApiError(error instanceof Error ? error.message : 'No se pudieron actualizar las entrevistas.');
+          });
+
+        const toast = Swal.mixin({
+          toast: true,
+          position: 'top-end',
+          showConfirmButton: false,
+          timer: 3500,
+          timerProgressBar: true,
+        });
+        void toast.fire({ icon: 'success', title: 'Nueva encuesta recibida', text: 'El dashboard se está actualizando.' });
+      });
+
+      source.onerror = () => {
+        if (retryTimer !== undefined || disposed) return;
+        retryTimer = window.setTimeout(async () => {
+          retryTimer = undefined;
+          try {
+            const session = await getCurrentSession();
+            if (!session || disposed) {
+              source?.close();
+              return;
+            }
+            source?.close();
+            connect();
+          } catch {
+            // EventSource reintentará; la próxima conexión volverá a validar cookies.
+          }
+        }, 10_000);
+      };
+    };
+
+    connect();
+    return () => {
+      disposed = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      source?.close();
+    };
+  }, [authenticatedSession, currentUserRole]);
+
+  useEffect(() => {
     if (!authenticatedSession) return;
     let isCurrent = true;
     setIsInterviewsLoading(true);
     void listInterviews()
       .then((loadedInterviews) => {
         if (!isCurrent) return;
-        setInterviews(loadedInterviews);
+        void getPendingInterviews().then((pending) => {
+          if (!isCurrent) return;
+          const pendingRecords = pending.map((item) => item.record);
+          const pendingIds = new Set(pendingRecords.map((record) => record.id));
+          setInterviews([...pendingRecords, ...loadedInterviews.filter((record) => !pendingIds.has(record.id))]);
+        });
         setInterviewsApiError(null);
       })
       .catch((error: unknown) => {
@@ -505,6 +695,42 @@ export function App() {
   // Historial y resultados: se cargan desde PostgreSQL por medio de la API.
   const [interviews, setInterviews] = useState<InterviewRecord[]>([]);
 
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authenticatedSession || !isOnline || !navigator.onLine) return;
+    let cancelled = false;
+    const synchronizePending = async () => {
+      const pending = await getPendingInterviews();
+      for (const item of pending) {
+        if (cancelled || item.enumeratorUsername.toLowerCase() !== authenticatedSession.username.toLowerCase()) continue;
+        try {
+          await createInterviewRequest(item.input);
+          await removePendingInterview(item.deviceUuid);
+          setInterviews((previous) => previous.map((record) =>
+            record.id === item.record.id ? { ...record, status: 'synced' } : record
+          ));
+        } catch {
+          // Mantener el registro local para reintentar cuando vuelva la conexión.
+          break;
+        }
+      }
+    };
+    void synchronizePending();
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedSession, isOnline]);
+
   const mapInterviews = useMemo(
     () => interviews.filter((record) =>
       record.surveyId === currentSurvey.id &&
@@ -516,6 +742,40 @@ export function App() {
   const currentSurveyInterviews = useMemo(
     () => interviews.filter((record) => record.surveyId === currentSurvey.id),
     [interviews, currentSurvey.id]
+  );
+  const latestInterviewNotifications = useMemo(
+    () => [...interviews]
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+      .slice(0, 5),
+    [interviews]
+  );
+  const mayorVoteQuestion = useMemo(
+    () => currentSurvey.questions.find((question) => {
+      const title = question.title.toLocaleLowerCase();
+      return title.includes('alcalde') && /(vot|candidat|eleccion)/.test(title);
+    }),
+    [currentSurvey.questions]
+  );
+  const mayorVoteResults = useMemo(() => {
+    if (!mayorVoteQuestion) return [];
+    const answers = currentSurveyInterviews
+      .map((record) => record.answers.find((answer) => answer.questionId === mayorVoteQuestion.id)?.answerText)
+      .filter((answer): answer is string => Boolean(answer && answer !== 'Sin respuesta'));
+    return mayorVoteQuestion.options.length
+      ? mayorVoteQuestion.options.map((option) => ({
+          nombre: option.text,
+          votos: answers.filter((answer) => answer === option.text || answer.startsWith(`${option.text}:`)).length,
+          color: option.color || '#05a6f0',
+        }))
+      : Array.from(new Set(answers)).map((answer, index) => ({
+          nombre: answer,
+          votos: answers.filter((item) => item === answer).length,
+          color: ['#05a6f0', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444'][index % 5],
+        }));
+  }, [currentSurveyInterviews, mayorVoteQuestion]);
+  const enumeratorSurveyInterviews = useMemo(
+    () => currentSurveyInterviews.filter((record) => record.enumeratorAlias.trim().toLowerCase() === currentEnumeratorAlias.trim().toLowerCase()),
+    [currentSurveyInterviews, currentEnumeratorAlias]
   );
 
   // ── FUNCIÓN PARA OBTENER EL PRÓXIMO FOLIO CORRELATIVO (User1-01, User1-02...) ──
@@ -538,8 +798,8 @@ export function App() {
   // Formulario de campo
   const [fieldCommunity, setFieldCommunity] = useState<string>('');
   const [fieldAnswers, setFieldAnswers] = useState<Record<string, string>>({});
-  const [fieldAgeGroup, setFieldAgeGroup] = useState<string>('26-35 años');
-  const [fieldGender, setFieldGender] = useState<string>('Femenino');
+  const [fieldAgeGroup, setFieldAgeGroup] = useState<string>('');
+  const [fieldGender, setFieldGender] = useState<string>('');
   const [formSuccessMessage, setFormSuccessMessage] = useState<string | null>(null);
 
   // Sincronizar comunidad por defecto cuando cambia la encuesta o el encuestador
@@ -611,16 +871,6 @@ export function App() {
       return;
     }
 
-    if (!isOnline) {
-      void Swal.fire({
-        icon: 'error',
-        title: 'Sin conexión con la base de datos',
-        text: 'Conéctate al servidor para guardar la entrevista y que aparezca en las estadísticas.',
-        confirmButtonColor: '#05a6f0'
-      });
-      return;
-    }
-
     const selectedCommunity = currentSurvey.communities.find((community) => community.name === fieldCommunity);
     if (!selectedCommunity) {
       void Swal.fire({
@@ -646,12 +896,28 @@ export function App() {
       };
     });
 
+    const deviceUuid = window.crypto.randomUUID();
+    const interviewedAt = new Date().toISOString();
+    const writeInput = {
+      deviceUuid,
+      surveyId: currentSurvey.id,
+      communityId: selectedCommunity.id,
+      folio: folioId,
+      ageGroup: fieldAgeGroup,
+      gender: fieldGender,
+      latitude: gpsLocation.lat,
+      longitude: gpsLocation.lng,
+      accuracy: gpsLocation.accuracy,
+      interviewedAt,
+      answers: answersList.map(({ questionId, answerText }) => ({ questionId, answerText }))
+    };
     const newRecord: InterviewRecord = {
       id: folioId,
       surveyId: currentSurvey.id,
       surveyTitle: currentSurvey.title,
       enumeratorAlias: currentEnumeratorAlias,
       surveyNumber: surveyNum,
+      enumeratorName: authenticatedSession?.fullName || currentEnumeratorAlias,
       department: currentSurvey.department,
       municipality: currentSurvey.municipality,
       community: fieldCommunity,
@@ -660,26 +926,39 @@ export function App() {
       lat: gpsLocation.lat,
       lng: gpsLocation.lng,
       accuracy: gpsLocation.accuracy,
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      timestamp: interviewedAt,
       status: 'synced',
       answers: answersList
     };
 
     setIsInterviewSaving(true);
+    let savedOffline = false;
     try {
-      await createInterviewRequest({
-        deviceUuid: window.crypto.randomUUID(),
-        surveyId: currentSurvey.id,
-        communityId: selectedCommunity.id,
-        folio: folioId,
-        ageGroup: fieldAgeGroup,
-        gender: fieldGender,
-        latitude: gpsLocation.lat,
-        longitude: gpsLocation.lng,
-        accuracy: gpsLocation.accuracy,
-        interviewedAt: new Date().toISOString(),
-        answers: answersList.map(({ questionId, answerText }) => ({ questionId, answerText }))
-      });
+      if (!isOnline || !navigator.onLine) {
+        await savePendingInterview({
+          deviceUuid,
+          enumeratorUsername: authenticatedSession!.username,
+          input: writeInput,
+          record: { ...newRecord, status: 'pending' },
+          createdAt: interviewedAt
+        });
+        savedOffline = true;
+      } else {
+        try {
+          await createInterviewRequest(writeInput);
+        } catch (error) {
+          if (!(error instanceof TypeError) && navigator.onLine) throw error;
+          await savePendingInterview({
+            deviceUuid,
+            enumeratorUsername: authenticatedSession!.username,
+            input: writeInput,
+            record: { ...newRecord, status: 'pending' },
+            createdAt: interviewedAt
+          });
+          savedOffline = true;
+          setIsOnline(false);
+        }
+      }
     } catch (error) {
       void Swal.fire({
         icon: 'error',
@@ -714,19 +993,24 @@ export function App() {
       })
     );
 
-    setInterviews((previous) => [newRecord, ...previous]);
+    setInterviews((previous) => [{ ...newRecord, status: savedOffline ? 'pending' : 'synced' }, ...previous]);
     setFieldAnswers(Object.fromEntries(currentSurvey.questions.map((question) => [question.id, ''])));
     setGpsLocation(null);
     setGpsUpdated(false);
     setGpsError(null);
-    setFormSuccessMessage(`¡Encuesta registrada con éxito bajo el Folio ${folioId} en ${fieldCommunity}!`);
-    void Swal.fire({
+    setFormSuccessMessage(savedOffline
+      ? `Encuesta ${folioId} guardada en este dispositivo. Se enviará al recuperar la conexión.`
+      : `¡Encuesta registrada con éxito bajo el Folio ${folioId} en ${fieldCommunity}!`);
+    await Swal.fire({
       icon: 'success',
-      title: 'Encuesta guardada',
-      text: `La encuesta ${folioId} se registró correctamente en ${fieldCommunity}.`,
+      title: savedOffline ? 'Encuesta guardada en el dispositivo' : 'Encuesta guardada',
+      text: savedOffline
+        ? `La encuesta ${folioId} quedó pendiente en este dispositivo y se sincronizará cuando vuelva la conexión.`
+        : `La encuesta ${folioId} se registró correctamente en ${fieldCommunity}.`,
       confirmButtonText: 'Continuar',
       confirmButtonColor: '#05a6f0'
     });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 
     setTimeout(() => {
       setFormSuccessMessage(null);
@@ -775,7 +1059,7 @@ export function App() {
     doc.text(`Municipio: ${record.municipality}, ${record.department}`, 20, 53);
     doc.text(`Comunidad Asignada: ${record.community}`, 20, 59);
 
-    doc.text(`Fecha y Hora: ${record.timestamp}`, 115, 46);
+    doc.text(`Fecha y Hora: ${formatGuatemalaDateTime(record.timestamp)}`, 115, 46);
     doc.text(`Perfil: ${record.ageGroup} | Género: ${record.gender}`, 115, 53);
     doc.text(`GPS: Lat ${record.lat}, Lng ${record.lng} (±${record.accuracy}m)`, 115, 59);
 
@@ -1028,7 +1312,7 @@ export function App() {
   };
 
   const handleStartEditSurvey = (survey: FullSurvey) => {
-    if (currentUserRole !== 'admin') return;
+    if (currentUserRole !== 'admin' || survey.status === 'archived') return;
     setEditingSurveyId(survey.id);
     setBuilderTitle(survey.title);
     setBuilderDepartment(survey.department);
@@ -1054,9 +1338,10 @@ export function App() {
     setSurveyApiError(null);
     try {
       await archiveSurvey(survey.id);
-      const remainingSurveys = surveys.filter((item) => item.id !== survey.id);
-      setSurveys(remainingSurveys);
-      if (selectedSurveyId === survey.id) setSelectedSurveyId(remainingSurveys[0]?.id ?? '');
+      setSurveys((previous) => previous.map((item) => item.id === survey.id ? { ...item, status: 'archived' } : item));
+      const nextSurvey = surveys.find((item) => item.id !== survey.id && item.status === 'active');
+      if (selectedSurveyId === survey.id) setSelectedSurveyId(nextSurvey?.id ?? '');
+      if (assignmentSurveyId === survey.id) setAssignmentSurveyId(nextSurvey?.id ?? '');
     } catch (error) {
       setSurveyApiError(error instanceof Error ? error.message : 'No se pudo archivar la encuesta.');
       return;
@@ -1065,6 +1350,23 @@ export function App() {
     }
     if (editingSurveyId === survey.id) setEditingSurveyId(null);
     setBuilderSuccessNotice(null);
+  };
+
+  const handleRestoreSurvey = async (survey: FullSurvey) => {
+    if (currentUserRole !== 'admin' || survey.status !== 'archived') return;
+    setIsSurveySaving(true);
+    setSurveyApiError(null);
+    try {
+      const restoredSurvey = await restoreSurveyRequest(survey.id);
+      setSurveys((previous) => previous.map((item) => item.id === restoredSurvey.id ? restoredSurvey : item));
+      setSelectedSurveyId(restoredSurvey.id);
+      setAssignmentSurveyId(restoredSurvey.id);
+      await Swal.fire({ icon: 'success', title: 'Encuesta reactivada', text: 'El estudio volvió a estado activo y sus asignaciones disponibles fueron restauradas.', timer: 2200, showConfirmButton: false });
+    } catch (error) {
+      setSurveyApiError(error instanceof Error ? error.message : 'No se pudo reactivar la encuesta.');
+    } finally {
+      setIsSurveySaving(false);
+    }
   };
 
   // Guardar o actualizar encuesta desde el Builder (Admin)
@@ -1078,6 +1380,10 @@ export function App() {
 
     const calculatedTarget = builderCommunities.reduce((a, b) => a + b.quota, 0) || builderTargetSample;
     const existingSurvey = editingSurveyId ? surveys.find((survey) => survey.id === editingSurveyId) : undefined;
+    if (existingSurvey?.status === 'archived') {
+      setSurveyApiError('Reactiva la encuesta antes de editarla.');
+      return;
+    }
     if (editingSurveyId && !existingSurvey) {
       setEditingSurveyId(null);
       alert('No se encontró la encuesta que intentas editar.');
@@ -1129,6 +1435,22 @@ export function App() {
 
   // GPS en vivo
   const handleCaptureGps = () => {
+    if (!window.isSecureContext) {
+      const message = 'El navegador bloquea el GPS porque esta página no usa HTTPS. La dirección local por IP (http://192.168...) no puede pedir permiso de ubicación. Abre la app mediante HTTPS y vuelve a pulsar “Actualizar GPS”.';
+      setGpsError('El GPS requiere una conexión HTTPS.');
+      setGpsLocation(null);
+      setGpsUpdated(false);
+      setGpsLoading(false);
+      void Swal.fire({
+        icon: 'warning',
+        title: 'El GPS requiere HTTPS',
+        text: message,
+        confirmButtonText: 'Entendido',
+        confirmButtonColor: '#05a6f0'
+      });
+      return;
+    }
+
     setGpsLoading(true);
     setGpsLocation(null);
     setGpsUpdated(false);
@@ -1150,6 +1472,8 @@ export function App() {
           setGpsUpdated(true);
           setGpsLoading(false);
         }, (error) => {
+          const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+          const isAndroid = /Android/i.test(navigator.userAgent);
           const message = error.code === 1
             ? 'Permite el acceso a la ubicación para capturar el GPS.'
             : error.code === 2
@@ -1159,11 +1483,22 @@ export function App() {
           setGpsLocation(null);
           setGpsUpdated(false);
           setGpsLoading(false);
+          const permissionHelp = isIOS
+            ? `<p style="text-align:left">${message}</p><ol style="text-align:left;padding-left:1.25rem;margin:.75rem 0 0"><li>Abre <b>Ajustes del iPhone → Chrome → Ubicación</b> y selecciona “Al usar la app”.</li><li>Si sigue bloqueado, revisa <b>Ajustes → Privacidad y seguridad → Localización</b> y permite el acceso a Chrome.</li><li>Regresa a la encuesta y pulsa “Actualizar GPS”.</li></ol>`
+            : isAndroid
+              ? `<p style="text-align:left">${message}</p><ol style="text-align:left;padding-left:1.25rem;margin:.75rem 0 0"><li>Activa <b>Ubicación</b> en los ajustes rápidos del teléfono.</li><li>En Chrome, abre <b>⋮ → Configuración → Configuración de sitios → Ubicación</b> y permite el acceso.</li><li>Regresa a la encuesta y pulsa “Actualizar GPS”.</li></ol>`
+              : `<p style="text-align:left">${message}</p><p style="text-align:left;margin:.75rem 0 0">Permite la ubicación para este sitio en los ajustes del navegador y vuelve a pulsar “Actualizar GPS”.</p>`;
           void Swal.fire({
-            icon: 'error',
-            title: 'No se pudo actualizar el GPS',
-            text: message,
+            icon: error.code === 1 ? 'warning' : 'error',
+            title: error.code === 1 ? 'Permite el acceso al GPS' : 'No se pudo actualizar el GPS',
+            text: error.code === 1 ? undefined : message,
+            html: error.code === 1 ? permissionHelp : undefined,
+            showCancelButton: true,
+            confirmButtonText: 'Ya lo activé, reintentar',
+            cancelButtonText: 'Ahora no',
             confirmButtonColor: '#05a6f0'
+          }).then((result) => {
+            if (result.isConfirmed) handleCaptureGps();
           });
         },
         { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
@@ -1366,7 +1701,11 @@ export function App() {
   const handleRefreshInterviews = async () => {
     setIsInterviewsLoading(true);
     try {
-      setInterviews(await listInterviews());
+      const loaded = await listInterviews();
+      const pending = await getPendingInterviews();
+      const pendingRecords = pending.map((item) => item.record);
+      const pendingIds = new Set(pendingRecords.map((record) => record.id));
+      setInterviews([...pendingRecords, ...loaded.filter((record) => !pendingIds.has(record.id))]);
       setInterviewsApiError(null);
     } catch (error) {
       setInterviewsApiError(error instanceof Error ? error.message : 'No se pudieron actualizar las entrevistas.');
@@ -1374,6 +1713,34 @@ export function App() {
       setIsInterviewsLoading(false);
     }
   };
+
+  const handleRefreshAdminLogs = async () => {
+    setAdminLogsLoading(true);
+    try {
+      const [audit, errors] = await Promise.all([listAuditEvents(), listApplicationErrors()]);
+      setAuditEvents(audit);
+      setApplicationErrors(errors);
+      setAdminLogsError(null);
+    } catch (error) {
+      setAdminLogsError(error instanceof Error ? error.message : 'No se pudieron cargar los registros de administración.');
+    } finally {
+      setAdminLogsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'admin_config' || currentUserRole !== 'admin') return;
+    void handleRefreshAdminLogs();
+  }, [activeTab, currentUserRole]);
+
+  const filteredAuditEvents = auditEvents.filter((event) =>
+    `${event.userName} ${event.action} ${event.entityType ?? ''} ${event.ipAddress ?? ''} ${event.origin ?? ''}`
+      .toLowerCase().includes(adminLogsSearch.toLowerCase())
+  );
+  const filteredApplicationErrors = applicationErrors.filter((event) =>
+    `${event.source} ${event.message} ${event.path ?? ''} ${event.userName ?? ''} ${event.ipAddress ?? ''}`
+      .toLowerCase().includes(adminLogsSearch.toLowerCase())
+  );
 
   if (isAuthChecking) {
     return (
@@ -1440,9 +1807,11 @@ export function App() {
             <select
               value={selectedSurveyId}
               onChange={(e) => setSelectedSurveyId(e.target.value)}
+              disabled={activeSurveys.length === 0}
               style={{ background: 'transparent', border: 'none', color: '#43bff5', fontSize: '0.78rem', fontWeight: 700, outline: 'none', cursor: 'pointer' }}
             >
-              {surveys.map((s) => (
+              {activeSurveys.length === 0 && <option value="">Sin estudios activos</option>}
+              {activeSurveys.map((s) => (
                 <option key={s.id} value={s.id} style={{ background: '#ffffff', color: '#1f2933' }}>
                   {s.title} ({s.municipality})
                 </option>
@@ -1476,6 +1845,11 @@ export function App() {
               <>
                 <WifiOff size={14} /> Modo Offline
               </>
+            )}
+            {interviews.some((record) => record.status === 'pending') && (
+              <span style={{ marginLeft: '0.3rem' }}>
+                · {interviews.filter((record) => record.status === 'pending').length} pendientes
+              </span>
             )}
           </button>
         </div>
@@ -1573,12 +1947,28 @@ export function App() {
               Usuarios ({usersList.length})
             </button>
           )}
+          {currentUserRole === 'admin' && (
+            <button
+              type="button"
+              className={`tab-btn ${activeTab === 'admin_config' ? 'active' : ''}`}
+              onClick={() => setActiveTab('admin_config')}
+            >
+              <Settings2 size={16} />
+              Bitácora y Errores
+            </button>
+          )}
         </nav>
 
         {/* ══════════════════════════════════════════════════════════════
             VISTA: TERMINAL DE CAMPO (EL ENCUESTADOR SOLO VE SUS COMUNIDADES)
            ══════════════════════════════════════════════════════════════ */}
         {activeTab === 'survey' && (
+          activeSurveys.length === 0 ? (
+            <div className="glass-panel survey-empty-state" role="status">
+              <h2>No hay estudios activos</h2>
+              <p>La terminal solo muestra estudios en estado activo. Contacta al administrador para activar o asignarte un estudio.</p>
+            </div>
+          ) : (
           <div style={{ maxWidth: '820px', margin: '0 auto' }}>
             <div className="glass-panel">
               {/* Encabezado del Terminal */}
@@ -1595,6 +1985,19 @@ export function App() {
                   <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
                     Municipio: <strong style={{ color: '#38bdf8' }}>{currentSurvey.municipality}</strong> ({currentSurvey.department}) • Estudio: {currentSurvey.title}
                   </p>
+                  {activeSurveys.length > 1 && (
+                    <label className="field-mobile-study-select">
+                      <span>Estudio asignado</span>
+                      <select value={selectedSurveyId} onChange={(event) => setSelectedSurveyId(event.target.value)}>
+                        {activeSurveys.map((survey) => (
+                          <option key={survey.id} value={survey.id}>
+                            {survey.title} · {survey.code} · {survey.questions.length} preguntas
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <span className="field-question-count">{currentSurvey.questions.length} preguntas cargadas</span>
                 </div>
 
                 <div style={{ textAlign: 'right' }}>
@@ -1603,6 +2006,33 @@ export function App() {
                   </span>
                 </div>
               </div>
+
+              <section aria-label="Resumen de encuestas realizadas" style={{ background: '#f0f9ff', border: '1px solid rgba(5, 166, 240, 0.25)', borderRadius: 'var(--radius-md)', padding: '1rem', marginBottom: '1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', marginBottom: enumeratorSurveyInterviews.length ? '0.75rem' : 0 }}>
+                  <div>
+                    <div style={{ color: '#075985', fontWeight: 800, fontSize: '0.95rem' }}>Mis encuestas en este estudio</div>
+                    <div style={{ color: '#475569', fontSize: '0.78rem', marginTop: '0.2rem' }}>Registradas por {currentEnumeratorAlias} · {currentSurvey.title}</div>
+                  </div>
+                  <span className="badge badge-primary" style={{ fontSize: '0.9rem', padding: '0.4rem 0.7rem' }}>
+                    {enumeratorSurveyInterviews.length} {enumeratorSurveyInterviews.length === 1 ? 'encuesta realizada' : 'encuestas realizadas'}
+                  </span>
+                </div>
+                {enumeratorSurveyInterviews.length > 0 && (
+                  <div style={{ display: 'grid', gap: '0.5rem' }}>
+                    {enumeratorSurveyInterviews.slice(0, 5).map((record) => (
+                      <div key={record.surveyId + record.id} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: '0.3rem 0.9rem', padding: '0.65rem 0.75rem', background: '#fff', border: '1px solid #dbeafe', borderRadius: '8px', fontSize: '0.78rem' }}>
+                        <span><strong>ID:</strong> {record.id}</span>
+                        <span><strong>No. encuesta:</strong> {record.surveyNumber}</span>
+                        <span><strong>Comunidad:</strong> {record.community}</span>
+                        <span><strong>GPS:</strong> {record.lat.toFixed(6)}, {record.lng.toFixed(6)}</span>
+                      </div>
+                    ))}
+                    {enumeratorSurveyInterviews.length > 5 && (
+                      <span style={{ color: '#475569', fontSize: '0.75rem' }}>Mostrando las 5 más recientes de {enumeratorSurveyInterviews.length} encuestas.</span>
+                    )}
+                  </div>
+                )}
+              </section>
 
               {formSuccessMessage && (
                 <div
@@ -1640,8 +2070,8 @@ export function App() {
 
               <form onSubmit={handleSaveInterview}>
                 {/* 1. SELECCIÓN DE COMUNIDAD ASIGNADA EXCLUSIVAMENTE POR EL ADMIN */}
-                <div style={{ background: '#f4f7f9', padding: '1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)', marginBottom: '1.5rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                <div className="field-territory-panel" style={{ background: '#f4f7f9', padding: '1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)', marginBottom: '1.5rem' }}>
+                  <div className="field-territory-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
                     <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#43bff5', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                       <MapPin size={15} /> 1. Territorio Asignado y Perfil del Ciudadano en {currentSurvey.municipality}
                     </div>
@@ -1650,9 +2080,9 @@ export function App() {
                     </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.85rem' }}>
+                  <div className="field-territory-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.85rem' }}>
                     {/* Selector de Comunidad: Solo muestra las asignadas a este encuestador sin permitir modificar */}
-                    <div className="form-group" style={{ gridColumn: 'span 2' }}>
+                    <div className="form-group field-community-field" style={{ gridColumn: 'span 2' }}>
                       <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
                         <span>Comunidad / Aldea Asignada por Administrador</span>
                         <span style={{ color: '#38bdf8', fontSize: '0.72rem', fontWeight: 700 }}>
@@ -1690,7 +2120,9 @@ export function App() {
                         className="form-select"
                         value={fieldAgeGroup}
                         onChange={(e) => setFieldAgeGroup(e.target.value)}
+                        required
                       >
+                        <option value="" disabled>Seleccionar opción</option>
                         <option value="18-25 años">18 a 25 años</option>
                         <option value="26-35 años">26 a 35 años</option>
                         <option value="36-50 años">36 a 50 años</option>
@@ -1704,7 +2136,9 @@ export function App() {
                         className="form-select"
                         value={fieldGender}
                         onChange={(e) => setFieldGender(e.target.value)}
+                        required
                       >
+                        <option value="" disabled>Seleccionar opción</option>
                         <option value="Femenino">Femenino</option>
                         <option value="Masculino">Masculino</option>
                         <option value="Prefiere no indicar">Prefiere no indicar</option>
@@ -1892,6 +2326,7 @@ export function App() {
                   type="submit"
                   disabled={userAssignedCommunities.length === 0 || isInterviewSaving || isInterviewsLoading}
                   className="btn btn-primary"
+                  aria-busy={isInterviewSaving}
                   style={{
                     width: '100%',
                     padding: '0.9rem',
@@ -1901,16 +2336,15 @@ export function App() {
                     cursor: userAssignedCommunities.length === 0 || isInterviewSaving || isInterviewsLoading ? 'not-allowed' : 'pointer'
                   }}
                 >
-                  <Send size={18} />
                   {isInterviewSaving
-                    ? 'Guardando en la base de datos...'
-                    : userAssignedCommunities.length > 0
-                    ? `Guardar y Registrar Encuesta No. ${currentNextSurveyId} (${fieldCommunity})`
-                    : 'No se puede enviar: Sin comunidad asignada'}
+                    ? <RefreshCw size={18} className="animate-spin" />
+                    : <Send size={18} />}
+                  {isInterviewSaving ? 'Guardando...' : 'Guardar Encuesta'}
                 </button>
               </form>
             </div>
           </div>
+          )
         )}
 
         {/* ══════════════════════════════════════════════════════════════
@@ -2557,6 +2991,75 @@ export function App() {
               </div>
             </div>
 
+            <div className="dashboard-live-grid">
+            <section className="glass-panel recent-surveys-panel" aria-labelledby="recent-surveys-heading">
+              <div className="recent-surveys-heading">
+                <div>
+                  <h3 id="recent-surveys-heading"><Bell size={17} /> Encuestas realizadas recientemente</h3>
+                  <p>Se muestran las últimas 5; las más antiguas salen al llegar nuevas.</p>
+                </div>
+                <span className="recent-surveys-count">{latestInterviewNotifications.length} / 5</span>
+              </div>
+
+              {latestInterviewNotifications.length ? (
+                <div className="recent-surveys-list">
+                  {latestInterviewNotifications.map((record, index) => (
+                    <article
+                      className={`recent-survey-row${record.id === newInterviewNotificationId ? ' is-new' : ''}`}
+                      key={`${record.surveyId}-${record.id}`}
+                    >
+                      <span className="recent-survey-index">{index + 1}</span>
+                      <div className="recent-survey-person">
+                        <strong>{record.enumeratorName || record.enumeratorAlias}</strong>
+                        <span>Encuesta No. {record.id}</span>
+                      </div>
+                      <div className="recent-survey-community">
+                        <span>Comunidad</span>
+                        <strong>{record.community || 'Sin comunidad'}</strong>
+                      </div>
+                      <time dateTime={record.timestamp}>{formatGuatemalaDateTime(record.timestamp)}</time>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="recent-surveys-empty">Todavía no hay encuestas realizadas.</div>
+              )}
+            </section>
+
+            <section className="glass-panel mayor-results-panel" aria-labelledby="mayor-results-heading">
+              <div className="recent-surveys-heading">
+                <div>
+                  <h3 id="mayor-results-heading"><BarChart3 size={17} /> Resultado de Alcalde</h3>
+                  <p>{mayorVoteQuestion?.title ?? `Sin pregunta de votación para Alcalde en ${currentSurvey.title}`}</p>
+                </div>
+                <span className="recent-surveys-count">
+                  {mayorVoteResults.reduce((sum, item) => sum + item.votos, 0)} votos
+                </span>
+              </div>
+              {mayorVoteQuestion ? (
+                mayorVoteResults.length ? (
+                  <div className="mayor-results-chart">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={mayorVoteResults} margin={{ top: 8, right: 8, left: -18, bottom: 52 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#dce4e9" />
+                        <XAxis dataKey="nombre" interval={0} angle={-28} textAnchor="end" height={68} tick={{ fontSize: 10 }} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
+                        <Tooltip />
+                        <Bar dataKey="votos" name="Votos" radius={[5, 5, 0, 0]}>
+                          {mayorVoteResults.map((item) => <Cell key={item.nombre} fill={item.color} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <div className="recent-surveys-empty">No hay respuestas registradas para esta pregunta.</div>
+                )
+              ) : (
+                <div className="recent-surveys-empty">Selecciona un estudio con una pregunta de votación para Alcalde.</div>
+              )}
+            </section>
+            </div>
+
             {/* RESULTADOS DE TODAS LAS PREGUNTAS */}
             <div className="glass-panel" style={{ marginBottom: '1.5rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
@@ -2675,7 +3178,7 @@ export function App() {
                           <td style={{ fontWeight: 600 }}>{item.enumeratorAlias}</td>
                           <td>{item.community}</td>
                           <td>{item.ageGroup} • {item.gender}</td>
-                          <td style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{item.timestamp}</td>
+                          <td style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{formatGuatemalaDateTime(item.timestamp)}</td>
                           <td style={{ fontWeight: 700, color: '#ec4899', fontSize: '0.78rem' }}>
                             {alcAns.length > 25 ? alcAns.substring(0, 22) + '...' : alcAns}
                           </td>
@@ -2766,8 +3269,8 @@ export function App() {
                 return (
                   <div key={srv.id} className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                      <span className={`badge ${srv.status === 'active' ? 'badge-emerald' : 'badge-primary'}`}>
-                        {srv.status === 'active' ? 'En Campo' : 'Borrador'}
+                      <span className={`badge ${srv.status === 'active' ? 'badge-emerald' : srv.status === 'archived' ? 'badge-archived' : srv.status === 'completed' ? 'badge-amber' : 'badge-primary'}`}>
+                        {srv.status === 'active' ? 'En Campo' : srv.status === 'archived' ? 'Archivada' : srv.status === 'completed' ? 'Finalizada' : 'Borrador'}
                       </span>
                       <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
                         {srv.code}
@@ -2780,12 +3283,18 @@ export function App() {
 
                     {currentUserRole === 'admin' && (
                       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                        <button type="button" className="btn btn-secondary" style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }} onClick={() => handleStartEditSurvey(srv)}>
-                          <Pencil size={13} /> Editar
-                        </button>
-                        <button type="button" className="btn btn-secondary" style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.28)' }} onClick={() => void handleDeleteSurvey(srv)} disabled={isSurveySaving}>
-                          <Trash2 size={13} /> Archivar
-                        </button>
+                        {srv.status === 'archived' ? (
+                          <button type="button" className="btn btn-primary" style={{ padding: '0.4rem 0.7rem', fontSize: '0.78rem' }} onClick={() => void handleRestoreSurvey(srv)} disabled={isSurveySaving}>
+                            <RefreshCw size={14} /> Reactivar encuesta
+                          </button>
+                        ) : <>
+                          <button type="button" className="btn btn-secondary" style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }} onClick={() => handleStartEditSurvey(srv)}>
+                            <Pencil size={13} /> Editar
+                          </button>
+                          <button type="button" className="btn btn-secondary" style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem', color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.28)' }} onClick={() => void handleDeleteSurvey(srv)} disabled={isSurveySaving}>
+                            <Trash2 size={13} /> Archivar
+                          </button>
+                        </>}
                       </div>
                     )}
 
@@ -2902,7 +3411,7 @@ export function App() {
                           <span>Encuestador: {record.enumeratorAlias}</span>
                           <span>Coordenadas: {record.lat.toFixed(5)}, {record.lng.toFixed(5)}</span>
                           <span>Precisión GPS: ±{record.accuracy} m</span>
-                          <span>{record.timestamp}</span>
+                          <span>{formatGuatemalaDateTime(record.timestamp)}</span>
                           <button type="button" onClick={() => setSelectedRecordForPdf(record)} className="btn btn-primary">
                             Ver boleta
                           </button>
@@ -2954,15 +3463,15 @@ export function App() {
                 <button type="button" className="btn btn-primary" onClick={() => void handleCreateAssignedCommunity()} disabled={!newAssignedCommunityName.trim() || activeEnumerators.length === 0 || savingAssignmentId !== null || assignmentSurvey.status === 'completed'}><Plus size={16} /> Agregar comunidad</button>
               </div>}
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
+              <div className="assignment-enumerator-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
                 {activeEnumerators.map((enumerator) => {
                   const comms = assignmentSurvey.communities.filter((c) => c.assignedTo.toLowerCase() === enumerator.alias.toLowerCase());
                   const totalQ = comms.reduce((a, b) => a + b.quota, 0);
                   const userInterviews = interviews.filter((i) => i.surveyId === assignmentSurvey.id && i.enumeratorAlias.toLowerCase() === enumerator.alias.toLowerCase());
 
-                  return <div key={enumerator.id} className="glass-panel" style={{ borderLeft: '3px solid #05a6f0', padding: '1rem' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                        <span style={{ fontWeight: 800, fontSize: '0.95rem', color: '#1f2933' }}>
+                  return <div key={enumerator.id} className="glass-panel assignment-enumerator-card" style={{ borderLeft: '3px solid #05a6f0', padding: '1rem' }}>
+                      <div className="assignment-enumerator-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                        <span style={{ minWidth: 0, overflowWrap: 'anywhere', fontWeight: 800, fontSize: '0.95rem', color: '#1f2933' }}>
                           👤 {enumerator.fullName} <small style={{ color: 'var(--text-muted)' }}>@{enumerator.alias}</small>
                         </span>
                         <span className="badge badge-primary">{comms.length} comunidad(es)</span>
@@ -2972,7 +3481,7 @@ export function App() {
                         Meta asignada: <strong style={{ color: '#05a6f0' }}>{totalQ}</strong> · Encuestas: <strong style={{ color: '#10b981' }}>{userInterviews.length}</strong>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-                        {comms.length ? comms.map((c) => <div key={c.id} style={{ background: '#f4f7f9', padding: '0.35rem 0.6rem', borderRadius: '4px', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between' }}><span>📍 {c.name}</span><span style={{ color: '#05a6f0', fontWeight: 700 }}>{c.quota} encuestas</span></div>) : <span style={{ color: 'var(--text-muted)', fontSize: '.8rem' }}>Sin comunidades asignadas</span>}
+                        {comms.length ? comms.map((c) => <div key={c.id} style={{ minWidth: 0, background: '#f4f7f9', padding: '0.45rem 0.6rem', borderRadius: '4px', fontSize: '0.75rem', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'start', gap: '0.4rem' }}><span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>📍 {c.name}</span><span style={{ color: '#05a6f0', fontWeight: 700, whiteSpace: 'nowrap', textAlign: 'right' }}>{c.quota} encuestas</span></div>) : <span style={{ color: 'var(--text-muted)', fontSize: '.8rem' }}>Sin comunidades asignadas</span>}
                       </div>
                     </div>;
                 })}
@@ -2988,8 +3497,8 @@ export function App() {
                   </span>
                 </div>
 
-                <div className="table-responsive">
-                  <table className="data-table">
+                <div className="table-responsive assigned-communities-responsive">
+                  <table className="data-table assigned-communities-table">
                     <thead>
                       <tr>
                         <th>Comunidad / Aldea</th>
@@ -3002,14 +3511,14 @@ export function App() {
                     <tbody>
                       {assignmentSurvey.communities.map((c) => (
                         <tr key={c.id}>
-                          <td style={{ fontWeight: 700 }}>📍 {c.name}</td>
-                          <td>{c.quota} encuestas</td>
-                          <td>
+                          <td data-label="Comunidad / Aldea" style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>📍 {c.name}</td>
+                          <td data-label="Meta Cuota">{c.quota} encuestas</td>
+                          <td data-label="Encuestador asignado">
                             <span className="survey-id-badge" style={{ fontSize: '0.75rem' }}>
                               {activeEnumerators.find((user) => user.alias.toLowerCase() === c.assignedTo.toLowerCase())?.fullName ?? c.assignedTo} (@{c.assignedTo})
                             </span>
                           </td>
-                          <td>
+                          <td data-label="Asignar a encuestador">
                             {currentUserRole === 'admin' ? (
                               <select
                                 className="form-select"
@@ -3026,7 +3535,7 @@ export function App() {
                               </span>
                             )}
                           </td>
-                          {currentUserRole === 'admin' && <td><button type="button" className="btn btn-secondary" onClick={() => void handleEditAssignedCommunity(c)} disabled={savingAssignmentId === c.id || assignmentSurvey.status === 'completed'}><Pencil size={14} /> Editar</button></td>}
+                          {currentUserRole === 'admin' && <td data-label="Editar"><button type="button" className="btn btn-secondary" onClick={() => void handleEditAssignedCommunity(c)} disabled={savingAssignmentId === c.id || assignmentSurvey.status === 'completed'}><Pencil size={14} /> Editar</button></td>}
                         </tr>
                       ))}
                       {assignmentSurvey.communities.length === 0 && <tr><td colSpan={currentUserRole === 'admin' ? 5 : 4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>Este estudio todavía no tiene comunidades asignadas.</td></tr>}
@@ -3199,6 +3708,95 @@ export function App() {
             </div>
           </section>
         )}
+
+        {activeTab === 'admin_config' && currentUserRole === 'admin' && (
+          <section className="admin-logs-module" aria-labelledby="admin-logs-title">
+            <div className="panel-header admin-logs-header">
+              <div>
+                <h2 className="panel-title" id="admin-logs-title">
+                  <Settings2 size={20} style={{ color: '#05a6f0' }} /> Configuración y bitácora del sistema
+                </h2>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginTop: '0.25rem' }}>
+                  Actividad de usuarios, origen de sesiones y errores del servidor o navegador.
+                </p>
+              </div>
+              <button type="button" className="btn btn-secondary" onClick={() => void handleRefreshAdminLogs()} disabled={adminLogsLoading}>
+                <RefreshCw size={15} className={adminLogsLoading ? 'animate-spin' : ''} />
+                {adminLogsLoading ? 'Actualizando...' : 'Actualizar registros'}
+              </button>
+            </div>
+
+            {adminLogsError && <div className="admin-logs-error" role="alert">{adminLogsError}</div>}
+
+            <div className="admin-logs-toolbar">
+              <div className="admin-logs-tabs" role="tablist" aria-label="Registros de administración">
+                <button type="button" role="tab" aria-selected={adminLogsTab === 'audit'} className={adminLogsTab === 'audit' ? 'selected' : ''} onClick={() => setAdminLogsTab('audit')}>
+                  Historial de actividad ({auditEvents.length})
+                </button>
+                <button type="button" role="tab" aria-selected={adminLogsTab === 'errors'} className={adminLogsTab === 'errors' ? 'selected' : ''} onClick={() => setAdminLogsTab('errors')}>
+                  <Bug size={15} />
+                  Errores ({applicationErrors.length})
+                </button>
+              </div>
+              <input
+                className="form-input admin-logs-search"
+                aria-label="Buscar en la bitácora"
+                placeholder="Buscar usuario, acción, IP o mensaje"
+                value={adminLogsSearch}
+                onChange={(event) => setAdminLogsSearch(event.target.value)}
+              />
+            </div>
+
+            {adminLogsTab === 'audit' ? (
+              <div className="table-responsive admin-logs-table-wrap">
+                <table className="data-table admin-logs-table">
+                  <thead><tr><th>Fecha y hora</th><th>Usuario</th><th>Acción</th><th>Entidad</th><th>IP de origen</th><th>Origen / navegador</th><th>Detalle</th></tr></thead>
+                  <tbody>
+                    {filteredAuditEvents.map((event) => (
+                      <tr key={event.id}>
+                        <td>{formatGuatemalaDateTime(event.createdAt)}</td>
+                        <td><strong>{event.userName}</strong></td>
+                        <td><span className="admin-log-action">{event.action}</span></td>
+                        <td>{event.entityType ?? '—'}</td>
+                        <td>{event.ipAddress ?? '—'}</td>
+                        <td title={event.userAgent ?? ''}>{event.origin || event.userAgent || '—'}</td>
+                        <td><details><summary>Ver</summary><pre className="admin-log-json">{JSON.stringify(event.changes ?? {}, null, 2)}</pre></details></td>
+                      </tr>
+                    ))}
+                    {filteredAuditEvents.length === 0 && <tr><td colSpan={7} className="admin-logs-empty">{adminLogsLoading ? 'Cargando bitácora...' : 'No hay actividades que coincidan.'}</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="table-responsive admin-logs-table-wrap">
+                <table className="data-table admin-logs-table">
+                  <thead><tr><th>Fecha y hora</th><th>Origen</th><th>Error</th><th>Ruta</th><th>Usuario</th><th>IP</th><th>Detalle técnico</th></tr></thead>
+                  <tbody>
+                    {filteredApplicationErrors.map((error) => (
+                      <tr key={error.id}>
+                        <td>{formatGuatemalaDateTime(error.createdAt)}</td>
+                        <td><span className={`admin-log-source ${error.source}`}>{error.source === 'backend' ? 'Servidor' : 'Frontend'}</span></td>
+                        <td className="admin-log-message">{error.message}</td>
+                        <td>{error.method ? `${error.method} ` : ''}{error.path ?? '—'}</td>
+                        <td>{error.userName ?? 'Sin sesión'}</td>
+                        <td>{error.ipAddress ?? '—'}</td>
+                        <td>
+                          <details>
+                            <summary>Ver</summary>
+                            {error.stack && <pre className="admin-log-json">{error.stack}</pre>}
+                            <pre className="admin-log-json">{JSON.stringify(error.details ?? {}, null, 2)}</pre>
+                          </details>
+                        </td>
+                      </tr>
+                    ))}
+                    {filteredApplicationErrors.length === 0 && <tr><td colSpan={7} className="admin-logs-empty">{adminLogsLoading ? 'Cargando errores...' : 'No hay errores que coincidan.'}</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="admin-logs-retention-note">Se muestran hasta 100 registros recientes. El sistema guarda IP, navegador y origen web como referencia de acceso; no determina una ubicación geográfica precisa.</p>
+          </section>
+        )}
       </main>
 
       <footer className="app-footer">
@@ -3261,7 +3859,7 @@ export function App() {
                   </div>
                   <div>
                     <span style={{ color: '#64748b', fontSize: '0.7rem', display: 'block' }}>Fecha y Hora</span>
-                    <strong style={{ color: '#22272b' }}>{selectedRecordForPdf.timestamp}</strong>
+                    <strong style={{ color: '#22272b' }}>{formatGuatemalaDateTime(selectedRecordForPdf.timestamp)}</strong>
                   </div>
                   <div>
                     <span style={{ color: '#64748b', fontSize: '0.7rem', display: 'block' }}>Edad y Género</span>

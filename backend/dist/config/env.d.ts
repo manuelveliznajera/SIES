@@ -15,7 +15,6 @@ export declare const env: {
     CORS_ORIGIN: string;
     RATE_LIMIT_WINDOW_MS: number;
     RATE_LIMIT_MAX_REQUESTS: number;
-    AUTH_RATE_LIMIT_MAX: number;
     LOG_LEVEL: "error" | "warn" | "info" | "debug";
     REPORTS_TEMP_DIR: string;
     MAX_EXPORT_ROWS: number;

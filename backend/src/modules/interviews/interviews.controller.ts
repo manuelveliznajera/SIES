@@ -2,6 +2,8 @@ import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { interviewInputSchema } from './interviews.validators';
 import { InterviewSubmissionError, interviewsService } from './interviews.service';
+import { publishInterviewCreated } from '../surveys/surveys.events';
+import { writeAuditEvent } from '../../services/observability';
 
 export async function listInterviews(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -16,6 +18,20 @@ export async function createInterview(req: Request, res: Response, next: NextFun
   try {
     const input = interviewInputSchema.parse(req.body);
     const interview = await interviewsService.create(input, req.user!.userId, req.user!.roles);
+    if (!interview.duplicate) {
+      await writeAuditEvent(req, {
+        action: 'interview.created',
+        entityType: 'interview',
+        entityId: interview.id,
+        changes: { folio: input.folio, surveyId: input.surveyId, communityId: input.communityId },
+      });
+      publishInterviewCreated({
+        id: interview.id,
+        folio: input.folio,
+        surveyId: input.surveyId,
+        createdAt: input.interviewedAt,
+      });
+    }
     res.status(201).json({ success: true, interview });
   } catch (error) {
     if (error instanceof ZodError) {

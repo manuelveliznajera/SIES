@@ -4,6 +4,7 @@ exports.errorHandler = errorHandler;
 exports.notFoundHandler = notFoundHandler;
 const zod_1 = require("zod");
 const logger_1 = require("../utils/logger");
+const observability_1 = require("../services/observability");
 /**
  * Manejador global de errores.
  * Debe registrarse ÚLTIMO en la cadena de middleware de Express.
@@ -47,6 +48,17 @@ _next) {
         }
     }
     // Log del error completo (sin exponerlo al cliente)
+    void (0, observability_1.writeApplicationError)({
+        source: 'backend',
+        message: err.message,
+        stack: err.stack,
+        path: req.path,
+        method: req.method,
+        userId: req.user?.userId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+        details: isPostgresError(err) && 'code' in err ? { databaseCode: String(err.code) } : {},
+    });
     logger_1.logger.error('Error no manejado', {
         message: err.message,
         stack: err.stack,

@@ -13,6 +13,7 @@ const interviewSchema = z.object({
   surveyTitle: z.string(),
   enumeratorAlias: z.string(),
   surveyNumber: z.number(),
+  enumeratorName: z.string(),
   department: z.string(),
   municipality: z.string(),
   community: z.string(),
@@ -31,7 +32,7 @@ const createResponseSchema = z.object({ success: z.literal(true), interview: z.o
 
 const apiBase = `${import.meta.env.VITE_API_URL ?? ''}/api/v1`;
 
-interface InterviewWriteInput {
+export interface InterviewWriteInput {
   deviceUuid: string;
   surveyId: string;
   communityId: string;

@@ -32,7 +32,6 @@ const envSchema = zod_1.z.object({
     // Rate limiting
     RATE_LIMIT_WINDOW_MS: zod_1.z.coerce.number().default(900000),
     RATE_LIMIT_MAX_REQUESTS: zod_1.z.coerce.number().default(100),
-    AUTH_RATE_LIMIT_MAX: zod_1.z.coerce.number().default(10),
     // Logs
     LOG_LEVEL: zod_1.z.enum(['error', 'warn', 'info', 'debug']).default('info'),
     // Reportes

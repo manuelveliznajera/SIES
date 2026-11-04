@@ -25,6 +25,7 @@ const interviews_routes_1 = require("./modules/interviews/interviews.routes");
 const sync_routes_1 = require("./modules/synchronization/sync.routes");
 const reports_routes_1 = require("./modules/reports/reports.routes");
 const users_routes_1 = require("./modules/users/users.routes");
+const adminLogs_routes_1 = require("./modules/adminLogs/adminLogs.routes");
 function createApp() {
     const app = (0, express_1.default)();
     // ── Seguridad HTTP ──────────────────────────────────
@@ -76,6 +77,7 @@ function createApp() {
     const apiBase = `/api/${env_1.env.API_VERSION}`;
     app.use(`${apiBase}/auth`, auth_routes_1.authRouter);
     app.use(`${apiBase}/users`, users_routes_1.usersRouter);
+    app.use(`${apiBase}/admin-logs`, adminLogs_routes_1.adminLogsRouter);
     app.use(`${apiBase}/geography`, geography_routes_1.geographyRouter);
     app.use(`${apiBase}/enumerators`, enumerators_routes_1.enumeratorsRouter);
     app.use(`${apiBase}/surveys`, surveys_routes_1.surveysRouter);

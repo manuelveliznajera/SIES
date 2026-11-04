@@ -7,10 +7,14 @@ exports.me = me;
 const auth_service_1 = require("./auth.service");
 const auth_validators_1 = require("./auth.validators");
 const env_1 = require("../../config/env");
+const observability_1 = require("../../services/observability");
+const isProduction = env_1.env.NODE_ENV === 'production';
 const COOKIE_OPTIONS = {
     httpOnly: true,
-    secure: env_1.env.COOKIE_SECURE,
-    sameSite: env_1.env.COOKIE_SAME_SITE,
+    // En desarrollo la app se prueba por HTTP desde localhost o una IP LAN.
+    // Forzar cookies Secure en ese contexto hace que navegadores móviles las rechacen.
+    secure: isProduction && env_1.env.COOKIE_SECURE,
+    sameSite: isProduction ? env_1.env.COOKIE_SAME_SITE : 'lax',
     path: '/',
 };
 const ACCESS_COOKIE_MAX_AGE = 15 * 60 * 1000; // 15 minutos
@@ -23,7 +27,13 @@ async function login(req, res, next) {
     try {
         const { identifier, password } = auth_validators_1.loginSchema.shape.body.parse(req.body);
         const result = await auth_service_1.authService.login(identifier, password);
-        if (!result.success || !result.accessToken || !result.refreshToken) {
+        if (!result.success || !result.accessToken || !result.refreshToken || !result.user) {
+            await (0, observability_1.writeAuditEvent)(req, {
+                userId: null,
+                action: 'auth.login.failed',
+                entityType: 'auth_session',
+                changes: { identifier, resultCode: result.code ?? 'AUTH_FAILED' },
+            });
             res.status(401).json({
                 success: false,
                 message: result.message ?? 'Error de autenticación.',
@@ -40,6 +50,12 @@ async function login(req, res, next) {
             ...COOKIE_OPTIONS,
             maxAge: REFRESH_COOKIE_MAX_AGE,
             path: '/api/v1/auth/refresh', // Solo enviado a este endpoint
+        });
+        await (0, observability_1.writeAuditEvent)(req, {
+            userId: result.user.id,
+            action: 'auth.login.succeeded',
+            entityType: 'auth_session',
+            changes: { username: result.user.username, roles: result.user.roles },
         });
         res.status(200).json({
             success: true,
@@ -105,6 +121,11 @@ async function logout(req, res, next) {
     try {
         if (req.user?.userId) {
             await auth_service_1.authService.logout(req.user.userId);
+            await (0, observability_1.writeAuditEvent)(req, {
+                action: 'auth.logout',
+                entityType: 'auth_session',
+                changes: { username: req.user.username },
+            });
         }
         res.clearCookie('access_token', COOKIE_OPTIONS);
         res.clearCookie('refresh_token', { ...COOKIE_OPTIONS, path: '/api/v1/auth/refresh' });
@@ -130,7 +151,7 @@ async function me(req, res) {
             username: req.user.username,
             fullName: req.user.fullName ?? req.user.username,
             roles: req.user.roles,
-            enumeratorId: req.user.enumeratorId,
+            enumeratorId: req.user.enumeratorId ?? null,
         },
     });
 }

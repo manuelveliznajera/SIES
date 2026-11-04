@@ -4,10 +4,7 @@ exports.authRouter = void 0;
 const express_1 = require("express");
 const auth_controller_1 = require("./auth.controller");
 const authenticate_1 = require("../../middleware/authenticate");
-const rateLimiter_1 = require("../../middleware/rateLimiter");
 exports.authRouter = (0, express_1.Router)();
-// Aplicar rate limiter estricto a endpoints de autenticación
-exports.authRouter.use(rateLimiter_1.authRateLimiter);
 /**
  * POST /api/v1/auth/login
  * Body: { identifier: string, password: string }

@@ -20,6 +20,7 @@ import { interviewsRouter } from './modules/interviews/interviews.routes';
 import { syncRouter } from './modules/synchronization/sync.routes';
 import { reportsRouter } from './modules/reports/reports.routes';
 import { usersRouter } from './modules/users/users.routes';
+import { adminLogsRouter } from './modules/adminLogs/adminLogs.routes';
 
 export function createApp(): Application {
   const app = express();
@@ -86,6 +87,7 @@ export function createApp(): Application {
 
   app.use(`${apiBase}/auth`, authRouter);
   app.use(`${apiBase}/users`, usersRouter);
+  app.use(`${apiBase}/admin-logs`, adminLogsRouter);
   app.use(`${apiBase}/geography`, geographyRouter);
   app.use(`${apiBase}/enumerators`, enumeratorsRouter);
   app.use(`${apiBase}/surveys`, surveysRouter);

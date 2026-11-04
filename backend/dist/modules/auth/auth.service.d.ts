@@ -14,12 +14,12 @@ interface LoginResult {
 }
 /**
  * Servicio de autenticación.
- * Gestiona login, tokens JWT, refresh tokens y bloqueo de cuentas.
+ * Gestiona login, tokens JWT y refresh tokens.
  */
 export declare class AuthService {
     /**
      * Intenta autenticar a un usuario con username/email y contraseña.
-     * Implementa bloqueo temporal tras intentos fallidos.
+     * Verifica las credenciales y genera tokens para una sesión válida.
      */
     login(identifier: string, password: string): Promise<LoginResult>;
     /**
@@ -35,7 +35,6 @@ export declare class AuthService {
      */
     hashPassword(password: string): Promise<string>;
     private generateTokens;
-    private handleFailedAttempt;
     private hashToken;
     /** Simula el tiempo de un bcrypt.compare para prevenir timing attacks */
     private simulateHashCheck;

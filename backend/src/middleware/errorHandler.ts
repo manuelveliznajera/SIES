@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { logger } from '../utils/logger';
+import { writeApplicationError } from '../services/observability';
 
 /**
  * Respuesta de error estándar de la API.
@@ -63,6 +64,17 @@ export function errorHandler(
   }
 
   // Log del error completo (sin exponerlo al cliente)
+  void writeApplicationError({
+    source: 'backend',
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+    userId: req.user?.userId,
+    ipAddress: req.ip,
+    userAgent: req.get('user-agent'),
+    details: isPostgresError(err) && 'code' in err ? { databaseCode: String(err.code) } : {},
+  });
   logger.error('Error no manejado', {
     message: err.message,
     stack: err.stack,

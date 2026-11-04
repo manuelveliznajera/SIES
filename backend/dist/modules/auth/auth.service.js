@@ -11,16 +11,14 @@ const pool_1 = require("../../database/pool");
 const env_1 = require("../../config/env");
 const logger_1 = require("../../utils/logger");
 const BCRYPT_ROUNDS = 12;
-const MAX_FAILED_ATTEMPTS = 10;
-const LOCKOUT_MINUTES = 15;
 /**
  * Servicio de autenticación.
- * Gestiona login, tokens JWT, refresh tokens y bloqueo de cuentas.
+ * Gestiona login, tokens JWT y refresh tokens.
  */
 class AuthService {
     /**
      * Intenta autenticar a un usuario con username/email y contraseña.
-     * Implementa bloqueo temporal tras intentos fallidos.
+     * Verifica las credenciales y genera tokens para una sesión válida.
      */
     async login(identifier, password) {
         // Buscar usuario por username o email
@@ -53,19 +51,9 @@ class AuthService {
                 code: 'ACCOUNT_DISABLED',
             };
         }
-        // Verificar bloqueo temporal
-        if (user.locked_until && new Date() < new Date(user.locked_until)) {
-            const minutesLeft = Math.ceil((new Date(user.locked_until).getTime() - Date.now()) / 60000);
-            return {
-                success: false,
-                message: `Cuenta bloqueada temporalmente. Intenta nuevamente en ${minutesLeft} minuto(s).`,
-                code: 'ACCOUNT_LOCKED',
-            };
-        }
         // Verificar contraseña
         const passwordValid = await bcrypt_1.default.compare(password, user.password_hash);
         if (!passwordValid) {
-            await this.handleFailedAttempt(user.id, user.failed_attempts);
             return {
                 success: false,
                 message: 'Credenciales incorrectas.',
@@ -179,15 +167,6 @@ class AuthService {
          VALUES ($1, $2, $3)`, [user.id, tokenHash, expiresAt]);
         });
         return { accessToken, refreshToken: rawRefreshToken };
-    }
-    async handleFailedAttempt(userId, currentAttempts) {
-        const newAttempts = currentAttempts + 1;
-        let lockedUntil = null;
-        if (newAttempts >= MAX_FAILED_ATTEMPTS) {
-            lockedUntil = new Date(Date.now() + LOCKOUT_MINUTES * 60 * 1000);
-            logger_1.logger.warn('Cuenta bloqueada por intentos fallidos', { userId, attempts: newAttempts });
-        }
-        await (0, pool_1.query)(`UPDATE users SET failed_attempts = $1, locked_until = $2 WHERE id = $3`, [newAttempts, lockedUntil, userId]);
     }
     hashToken(token) {
         return crypto_1.default.createHash('sha256').update(token).digest('hex');

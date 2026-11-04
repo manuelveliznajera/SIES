@@ -11,6 +11,7 @@ interface InterviewRow {
   department: string;
   municipality: string;
   enumerator_alias: string;
+  enumerator_name: string;
   community: string;
   age_group: string;
   gender: string;
@@ -50,6 +51,7 @@ function mapInterview(row: InterviewRow) {
     surveyTitle: row.survey_title,
     enumeratorAlias: row.enumerator_alias,
     surveyNumber: sequence,
+    enumeratorName: row.enumerator_name,
     department: row.department,
     municipality: row.municipality,
     community: row.community,
@@ -71,6 +73,7 @@ export class InterviewsService {
       `SELECT i.id, i.device_uuid, i.device_info->>'folio' AS folio,
               i.survey_id, s.name AS survey_title, d.name AS department,
               m.name AS municipality, u.username AS enumerator_alias,
+              u.full_name AS enumerator_name,
               c.name AS community,
               COALESCE(i.device_info->>'ageGroup', '') AS age_group,
               COALESCE(i.device_info->>'gender', '') AS gender,
@@ -109,7 +112,7 @@ export class InterviewsService {
          WHERE aos.answer_id = a.id
        ) selected ON TRUE
        WHERE ($2::boolean OR e.user_id = $1)
-       GROUP BY i.id, s.name, d.name, m.name, u.username, c.name
+       GROUP BY i.id, s.name, d.name, m.name, u.username, u.full_name, c.name
        ORDER BY i.interviewed_at_device DESC, i.created_at DESC`,
       [userId, canViewAll]
     );

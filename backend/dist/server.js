@@ -4,6 +4,7 @@ const app_1 = require("./app");
 const env_1 = require("./config/env");
 const logger_1 = require("./utils/logger");
 const pool_1 = require("./database/pool");
+const observability_1 = require("./services/observability");
 async function bootstrap() {
     // Verificar conexión a la base de datos antes de aceptar tráfico
     const dbOk = await (0, pool_1.testConnection)();
@@ -38,13 +39,29 @@ async function bootstrap() {
         logger_1.logger.error('Promesa rechazada no manejada', {
             reason: reason instanceof Error ? reason.message : String(reason),
         });
+        void (0, observability_1.writeApplicationError)({
+            source: 'backend',
+            message: reason instanceof Error ? reason.message : String(reason),
+            stack: reason instanceof Error ? reason.stack : undefined,
+            details: { scope: 'process', event: 'unhandledRejection' },
+        });
     });
     process.on('uncaughtException', (err) => {
         logger_1.logger.error('Excepción no capturada. Cerrando proceso.', {
             error: err.message,
             stack: err.stack,
         });
-        process.exit(1);
+        const exitTimer = setTimeout(() => process.exit(1), 2000);
+        exitTimer.unref();
+        void (0, observability_1.writeApplicationError)({
+            source: 'backend',
+            message: err.message,
+            stack: err.stack,
+            details: { scope: 'process', event: 'uncaughtException' },
+        }).finally(() => {
+            clearTimeout(exitTimer);
+            process.exit(1);
+        });
     });
 }
 bootstrap();

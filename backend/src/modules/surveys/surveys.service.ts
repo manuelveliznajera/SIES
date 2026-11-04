@@ -3,7 +3,8 @@ import type { PoolClient } from 'pg';
 import { query, withTransaction } from '../../database/pool';
 import type { SurveyInput } from './surveys.validators';
 
-type SurveyStatus = 'active' | 'draft' | 'completed';
+type SurveyStatus = 'active' | 'draft' | 'completed' | 'archived';
+type EditableSurveyStatus = Exclude<SurveyStatus, 'archived'>;
 type QuestionType = SurveyInput['questions'][number]['type'];
 
 interface SurveyRow {
@@ -56,7 +57,7 @@ export interface SurveyRecord {
   startDate: string;
   endDate: string;
   targetSample: number;
-  status: 'active' | 'draft' | 'completed';
+  status: SurveyStatus;
   questions: Array<{
     id: string;
     title: string;
@@ -81,10 +82,11 @@ const SURVEY_SELECT = `
 function frontendStatus(status: SurveyRow['status']): SurveyStatus {
   if (status === 'finished') return 'completed';
   if (status === 'active') return 'active';
+  if (status === 'archived') return 'archived';
   return 'draft';
 }
 
-function databaseStatus(status: SurveyStatus): 'active' | 'draft' | 'finished' {
+function databaseStatus(status: EditableSurveyStatus): 'active' | 'draft' | 'finished' {
   return status === 'completed' ? 'finished' : status;
 }
 
@@ -112,8 +114,7 @@ export class SurveysService {
     const isEnumerator = roles.includes('ENUMERATOR');
     const surveyResult = await query<SurveyListRow>(
       `${SURVEY_SELECT}
-       WHERE s.status <> 'archived'
-         AND ($2::boolean OR (
+       WHERE $2::boolean OR (
            s.status = 'active'
            AND (NOT $3::boolean OR EXISTS (
              SELECT 1
@@ -123,8 +124,8 @@ export class SurveysService {
              WHERE viewer_assignment.survey_id = s.id
                AND viewer_enumerator.user_id = $1
                AND viewer_assignment.status IN ('pending', 'active')
-           ))
          ))
+       )
        ORDER BY s.created_at DESC, s.name`,
       [userId, isAdmin, isEnumerator]
     );
@@ -153,16 +154,19 @@ export class SurveysService {
         [surveyIds]
       ),
       query<CommunityRow>(
-        `SELECT a.survey_id, c.id, COALESCE(a.community_name, c.name) AS name, u.username AS assigned_to,
+        `SELECT DISTINCT ON (a.survey_id, c.id)
+                a.survey_id, c.id, COALESCE(a.community_name, c.name) AS name, u.username AS assigned_to,
                 a.interview_goal AS quota
          FROM survey_assignments a
          JOIN communities c ON c.id = a.community_id
          JOIN enumerators e ON e.id = a.enumerator_id
          JOIN users u ON u.id = e.user_id
          WHERE a.survey_id = ANY($1::uuid[])
-           AND a.status IN ('pending', 'active')
-         ORDER BY a.survey_id, c.name`,
-        [surveyIds]
+           AND (a.status IN ('pending', 'active') OR a.survey_id = ANY($2::uuid[]))
+         ORDER BY a.survey_id, c.id,
+                  CASE WHEN a.status IN ('pending', 'active') THEN 0 ELSE 1 END,
+                  a.created_at DESC`,
+        [surveyIds, surveyResult.rows.filter((survey) => survey.status === 'archived').map((survey) => survey.id)]
       ),
     ]);
 
@@ -273,12 +277,43 @@ export class SurveysService {
         [surveyId]
       );
       if (!result.rowCount) return false;
-      await client.query(
-        `UPDATE survey_assignments SET status = 'cancelled'
-         WHERE survey_id = $1 AND status IN ('pending', 'active')`,
-        [surveyId]
-      );
       return true;
+    });
+  }
+
+  async restore(surveyId: string): Promise<SurveyRecord | null> {
+    return withTransaction(async (client) => {
+      const survey = await client.query<{ id: string }>(
+        `UPDATE surveys SET status = 'active'
+         WHERE id = $1 AND status = 'archived'
+         RETURNING id`, [surveyId]
+      );
+      if (!survey.rowCount) return null;
+
+      // Para registros archivados antes de conservar sus asignaciones, reactiva
+      // solo la asignación cancelada más reciente por comunidad.
+      await client.query(
+        `WITH latest_cancelled AS (
+           SELECT a.id, a.community_id,
+                  ROW_NUMBER() OVER (PARTITION BY a.community_id ORDER BY a.created_at DESC, a.id DESC) AS row_number
+           FROM survey_assignments a
+           JOIN enumerators e ON e.id = a.enumerator_id AND e.is_active = TRUE
+           JOIN users u ON u.id = e.user_id AND u.is_active = TRUE
+           JOIN user_roles ur ON ur.user_id = u.id
+           JOIN roles r ON r.id = ur.role_id AND r.name = 'ENUMERATOR'
+           WHERE a.survey_id = $1 AND a.status = 'cancelled'
+         )
+         UPDATE survey_assignments a SET status = 'pending'
+         FROM latest_cancelled latest
+         WHERE a.id = latest.id AND latest.row_number = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM survey_assignments active_assignment
+             WHERE active_assignment.survey_id = $1
+               AND active_assignment.community_id = a.community_id
+               AND active_assignment.status IN ('pending', 'active')
+           )`, [surveyId]
+      );
+      return this.getById(client, surveyId);
     });
   }
 
@@ -442,7 +477,7 @@ export class SurveysService {
       [surveyId, survey.current_version]
     );
     const communities = await client.query<CommunityRow>(
-      `SELECT a.survey_id, c.id, c.name, u.username AS assigned_to, a.interview_goal AS quota
+      `SELECT a.survey_id, c.id, COALESCE(a.community_name, c.name) AS name, u.username AS assigned_to, a.interview_goal AS quota
        FROM survey_assignments a
        JOIN communities c ON c.id = a.community_id
        JOIN enumerators e ON e.id = a.enumerator_id

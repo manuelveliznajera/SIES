@@ -3,11 +3,16 @@ import { authService } from './auth.service';
 import { loginSchema, refreshSchema } from './auth.validators';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
+import { writeAuditEvent } from '../../services/observability';
+
+const isProduction = env.NODE_ENV === 'production';
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: env.COOKIE_SECURE,
-  sameSite: env.COOKIE_SAME_SITE,
+  // En desarrollo la app se prueba por HTTP desde localhost o una IP LAN.
+  // Forzar cookies Secure en ese contexto hace que navegadores móviles las rechacen.
+  secure: isProduction && env.COOKIE_SECURE,
+  sameSite: isProduction ? env.COOKIE_SAME_SITE : 'lax' as const,
   path: '/',
 };
 
@@ -24,7 +29,13 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
     const result = await authService.login(identifier, password);
 
-    if (!result.success || !result.accessToken || !result.refreshToken) {
+    if (!result.success || !result.accessToken || !result.refreshToken || !result.user) {
+      await writeAuditEvent(req, {
+        userId: null,
+        action: 'auth.login.failed',
+        entityType: 'auth_session',
+        changes: { identifier, resultCode: result.code ?? 'AUTH_FAILED' },
+      });
       res.status(401).json({
         success: false,
         message: result.message ?? 'Error de autenticación.',
@@ -43,6 +54,13 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       ...COOKIE_OPTIONS,
       maxAge: REFRESH_COOKIE_MAX_AGE,
       path: '/api/v1/auth/refresh', // Solo enviado a este endpoint
+    });
+
+    await writeAuditEvent(req, {
+      userId: result.user.id,
+      action: 'auth.login.succeeded',
+      entityType: 'auth_session',
+      changes: { username: result.user.username, roles: result.user.roles },
     });
 
     res.status(200).json({
@@ -117,6 +135,11 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
   try {
     if (req.user?.userId) {
       await authService.logout(req.user.userId);
+      await writeAuditEvent(req, {
+        action: 'auth.logout',
+        entityType: 'auth_session',
+        changes: { username: req.user.username },
+      });
     }
 
     res.clearCookie('access_token', COOKIE_OPTIONS);
