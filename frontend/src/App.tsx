@@ -1802,22 +1802,24 @@ export function App() {
 
         <div className="nav-status-group">
           {/* Selector de Estudio Activo */}
-          <div className="header-study-select" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'rgba(255,255,255,0.04)', padding: '0.25rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Estudio:</span>
-            <select
-              value={selectedSurveyId}
-              onChange={(e) => setSelectedSurveyId(e.target.value)}
-              disabled={activeSurveys.length === 0}
-              style={{ background: 'transparent', border: 'none', color: '#43bff5', fontSize: '0.78rem', fontWeight: 700, outline: 'none', cursor: 'pointer' }}
-            >
-              {activeSurveys.length === 0 && <option value="">Sin estudios activos</option>}
-              {activeSurveys.map((s) => (
-                <option key={s.id} value={s.id} style={{ background: '#ffffff', color: '#1f2933' }}>
-                  {s.title} ({s.municipality})
-                </option>
-              ))}
-            </select>
-          </div>
+          {activeTab !== 'builder' && (
+            <div className="header-study-select" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'rgba(255,255,255,0.04)', padding: '0.25rem 0.65rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Estudio:</span>
+              <select
+                value={selectedSurveyId}
+                onChange={(e) => setSelectedSurveyId(e.target.value)}
+                disabled={activeSurveys.length === 0}
+                style={{ background: 'transparent', border: 'none', color: '#43bff5', fontSize: '0.78rem', fontWeight: 700, outline: 'none', cursor: 'pointer' }}
+              >
+                {activeSurveys.length === 0 && <option value="">Sin estudios activos</option>}
+                {activeSurveys.map((s) => (
+                  <option key={s.id} value={s.id} style={{ background: '#ffffff', color: '#1f2933' }}>
+                    {s.title} ({s.municipality})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="header-user-card" style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', background: '#f1f8fc', border: '1px solid #d7edf8', padding: '0.35rem 0.55rem 0.35rem 0.75rem', borderRadius: 'var(--radius-sm)' }}>
             <UserCheck size={15} style={{ color: '#05a6f0' }} />
