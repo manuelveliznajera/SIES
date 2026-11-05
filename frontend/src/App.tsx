@@ -2574,7 +2574,8 @@ export function App() {
                         value={activeEnumerators.some((user) => user.alias === newCommAssignee) ? newCommAssignee : activeEnumerators[0]?.alias ?? ''}
                         onChange={(e) => setNewCommAssignee(e.target.value)}
                         title="Encuestador asignado a esta comunidad"
-                        required
+                        required={activeEnumerators.length > 0}
+                        disabled={activeEnumerators.length === 0}
                       >
                         {activeEnumerators.length === 0 ? (
                           <option value="">No hay encuestadores activos</option>

@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "postbuild": "node dist/database/seedAdmin.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },
