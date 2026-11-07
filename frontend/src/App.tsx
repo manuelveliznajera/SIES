@@ -389,7 +389,8 @@ function FitMapToInterviews({ records }: { records: InterviewRecord[] }) {
 
 export function App() {
   // Pestaña activa
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'builder' | 'survey' | 'map' | 'surveys_list' | 'supervisors' | 'users' | 'admin_config'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'reports' | 'builder' | 'survey' | 'map' | 'surveys_list' | 'supervisors' | 'users' | 'admin_config'>('dashboard');
+  const [reportCommunityFilter, setReportCommunityFilter] = useState('all');
   const [adminLogsTab, setAdminLogsTab] = useState<'audit' | 'errors'>('audit');
   const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
   const [applicationErrors, setApplicationErrors] = useState<ApplicationErrorRecord[]>([]);
@@ -779,6 +780,53 @@ export function App() {
     () => interviews.filter((record) => record.surveyId === currentSurvey.id),
     [interviews, currentSurvey.id]
   );
+  const reportCommunities = useMemo(
+    () => [...new Set(currentSurveyInterviews.map((record) => record.community.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es')),
+    [currentSurveyInterviews]
+  );
+  useEffect(() => {
+    if (reportCommunityFilter !== 'all' && !reportCommunities.includes(reportCommunityFilter)) setReportCommunityFilter('all');
+  }, [reportCommunities, reportCommunityFilter]);
+  const reportInterviews = useMemo(
+    () => reportCommunityFilter === 'all'
+      ? currentSurveyInterviews
+      : currentSurveyInterviews.filter((record) => record.community.trim() === reportCommunityFilter),
+    [currentSurveyInterviews, reportCommunityFilter]
+  );
+  const electionReports = useMemo(() => {
+    const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase();
+    const categories = [
+      { key: 'president', label: 'Presidente', matches: (title: string) => title.includes('president') },
+      { key: 'mayor', label: 'Alcalde', matches: (title: string) => title.includes('alcalde') && /(vot|candidat|eleccion)/.test(title) },
+      { key: 'deputy', label: 'Diputados', matches: (title: string) => title.includes('diputad') },
+    ];
+    return categories.flatMap((category) => {
+      const question = currentSurvey.questions.find((item) => category.matches(normalize(item.title)));
+      if (!question) return [];
+      const counts = new Map<string, { label: string; count: number; color: string }>();
+      question.options.forEach((option) => counts.set(normalize(option.text), { label: option.text, count: 0, color: option.color || '#05a6f0' }));
+      let unanswered = 0;
+      for (const record of reportInterviews) {
+        const rawAnswer = record.answers.find((answer) => answer.questionId === question.id)?.answerText?.trim();
+        if (!rawAnswer || normalize(rawAnswer) === 'sin respuesta') {
+          unanswered += 1;
+          continue;
+        }
+        const normalizedAnswer = normalize(rawAnswer);
+        const matchingOption = question.options.find((option) => {
+          const normalizedOption = normalize(option.text);
+          return normalizedAnswer === normalizedOption || normalizedAnswer.startsWith(`${normalizedOption}:`);
+        });
+        const key = matchingOption ? normalize(matchingOption.text) : normalizedAnswer;
+        const result = counts.get(key);
+        if (result) result.count += 1;
+        else counts.set(key, { label: rawAnswer, count: 1, color: '#64748b' });
+      }
+      if (unanswered > 0) counts.set('__unanswered__', { label: 'Sin respuesta', count: unanswered, color: '#cbd5e1' });
+      const total = reportInterviews.length;
+      return [{ ...category, questionTitle: question.title, total, results: [...counts.values()].sort((a, b) => b.count - a.count) }];
+    });
+  }, [currentSurvey.questions, reportInterviews]);
   const communitySurveyProgress = useMemo(() => {
     const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase();
     const communities = currentSurvey.communities ?? [];
@@ -2114,6 +2162,15 @@ export function App() {
           >
             <BarChart3 size={16} />
             Dashboard ({currentSurvey.municipality})
+          </button>
+
+          <button
+            type="button"
+            className={`tab-btn ${activeTab === 'reports' ? 'active' : ''}`}
+            onClick={() => setActiveTab('reports')}
+          >
+            <FileText size={16} />
+            Reportes electorales
           </button>
 
           <button
@@ -3540,6 +3597,74 @@ export function App() {
               </div>
             </div>
           </div>
+        )}
+
+        {activeTab === 'reports' && currentUserRole !== 'encuestador' && (
+          <section aria-labelledby="election-reports-heading">
+            <div className="glass-panel" style={{ marginBottom: '1.25rem' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                <div>
+                  <h2 id="election-reports-heading" style={{ fontSize: '1.25rem', fontWeight: 800 }}>Reportes electorales</h2>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '.82rem', marginTop: '.3rem' }}>
+                    Intención de voto calculada con las encuestas guardadas en {currentSurvey.title}.
+                  </p>
+                </div>
+                <label className="form-group" style={{ minWidth: 'min(100%, 280px)', margin: 0 }}>
+                  <span>Filtrar por comunidad</span>
+                  <select className="form-select" value={reportCommunityFilter} onChange={(event) => setReportCommunityFilter(event.target.value)}>
+                    <option value="all">Todas las comunidades</option>
+                    {reportCommunities.map((community) => <option key={community} value={community}>{community}</option>)}
+                  </select>
+                </label>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', marginTop: '1rem', padding: '.75rem 1rem', borderRadius: 'var(--radius-sm)', background: '#eff8fc', color: '#075985', fontSize: '.85rem', flexWrap: 'wrap' }}>
+                <Users size={17} />
+                <strong>{reportInterviews.length.toLocaleString()} encuestas consideradas</strong>
+                <span>· Los porcentajes usan como base el total de encuestas del filtro seleccionado.</span>
+              </div>
+            </div>
+
+            {electionReports.length > 0 ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 340px), 1fr))', gap: '1rem' }}>
+                {electionReports.map((report) => {
+                  const responded = report.results.filter((result) => result.label !== 'Sin respuesta').reduce((sum, result) => sum + result.count, 0);
+                  return (
+                    <section key={report.key} className="glass-panel" style={{ minWidth: 0 }} aria-labelledby={`report-${report.key}`}>
+                      <div style={{ marginBottom: '1rem' }}>
+                        <h3 id={`report-${report.key}`} style={{ fontSize: '1.05rem', fontWeight: 800, color: '#075985' }}>Votación para {report.label}</h3>
+                        <p style={{ marginTop: '.35rem', color: 'var(--text-muted)', fontSize: '.76rem', lineHeight: 1.45 }}>{report.questionTitle}</p>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '.75rem', padding: '.65rem .75rem', marginBottom: '.6rem', borderRadius: 'var(--radius-sm)', background: '#f4f8fa', fontSize: '.76rem' }}>
+                        <span>Respuestas registradas</span><strong>{responded} / {report.total}</strong>
+                      </div>
+                      {report.total > 0 ? (
+                        <div style={{ display: 'grid', gap: '.75rem' }}>
+                          {report.results.map((result) => {
+                            const percentage = (result.count / report.total) * 100;
+                            return (
+                              <div key={`${report.key}-${result.label}`} style={{ minWidth: 0 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '.75rem', marginBottom: '.3rem', fontSize: '.8rem' }}>
+                                  <span style={{ overflowWrap: 'anywhere' }}>{result.label}</span>
+                                  <strong style={{ whiteSpace: 'nowrap' }}>{percentage.toFixed(1)}% <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({result.count})</span></strong>
+                                </div>
+                                <div style={{ height: 8, borderRadius: 999, background: '#e7eef2', overflow: 'hidden' }}>
+                                  <div style={{ width: `${Math.min(100, percentage)}%`, height: '100%', borderRadius: 999, background: result.color, transition: 'width 220ms ease' }} />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="recent-surveys-empty">No hay encuestas para la comunidad seleccionada.</div>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="glass-panel recent-surveys-empty">El estudio seleccionado no tiene preguntas configuradas para Presidente, Alcalde o Diputados.</div>
+            )}
+          </section>
         )}
 
         {/* ══════════════════════════════════════════════════════════════
