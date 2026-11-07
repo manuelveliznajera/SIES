@@ -49,6 +49,7 @@ function mapInterview(row: InterviewRow) {
   return {
     id: folio,
     databaseId: row.id,
+    deviceUuid: row.device_uuid,
     surveyId: row.survey_id,
     communityId: row.community_id,
     surveyTitle: row.survey_title,

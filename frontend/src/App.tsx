@@ -325,6 +325,7 @@ export interface InterviewAnswer {
 export interface InterviewRecord {
   id: string;               // Ej: "User1-01", "User1-02", "User2-01"
   databaseId?: string;
+  deviceUuid?: string;
   surveyId: string;
   communityId?: string;
   surveyTitle: string;
@@ -343,6 +344,24 @@ export interface InterviewRecord {
   timestamp: string;
   status: 'synced' | 'pending';
   answers: InterviewAnswer[];
+}
+
+function mergeInterviewRecords(pending: InterviewRecord[], loaded: InterviewRecord[]): InterviewRecord[] {
+  const records = new Map<string, InterviewRecord>();
+  for (const record of [...pending, ...loaded]) {
+    const key = record.deviceUuid
+      ? `device:${record.deviceUuid}`
+      : record.databaseId
+        ? `database:${record.databaseId}`
+        : `local:${record.surveyId}:${record.id}`;
+    const existing = records.get(key);
+    if (!existing || (existing.status === 'pending' && record.status === 'synced')) records.set(key, record);
+  }
+  return [...records.values()].sort((a, b) => {
+    const timestampA = Date.parse(a.timestamp);
+    const timestampB = Date.parse(b.timestamp);
+    return (Number.isFinite(timestampB) ? timestampB : 0) - (Number.isFinite(timestampA) ? timestampA : 0);
+  });
 }
 
 const interviewMarkerIcon = L.divIcon({
@@ -637,9 +656,8 @@ export function App() {
 
         void Promise.all([listInterviews(), getPendingInterviews()])
           .then(([loadedInterviews, pending]) => {
-            const pendingRecords = pending.map((item) => item.record);
-            const pendingIds = new Set(pendingRecords.map((record) => record.id));
-            setInterviews([...pendingRecords, ...loadedInterviews.filter((record) => !pendingIds.has(record.id))]);
+            const pendingRecords = pending.map((item) => ({ ...item.record, deviceUuid: item.deviceUuid }));
+            setInterviews(mergeInterviewRecords(pendingRecords, loadedInterviews));
             setInterviewsApiError(null);
           })
           .catch((error: unknown) => {
@@ -692,9 +710,8 @@ export function App() {
         if (!isCurrent) return;
         void getPendingInterviews().then((pending) => {
           if (!isCurrent) return;
-          const pendingRecords = pending.map((item) => item.record);
-          const pendingIds = new Set(pendingRecords.map((record) => record.id));
-          setInterviews([...pendingRecords, ...loadedInterviews.filter((record) => !pendingIds.has(record.id))]);
+          const pendingRecords = pending.map((item) => ({ ...item.record, deviceUuid: item.deviceUuid }));
+          setInterviews(mergeInterviewRecords(pendingRecords, loadedInterviews));
         });
         setInterviewsApiError(null);
       })
@@ -762,11 +779,21 @@ export function App() {
     () => interviews.filter((record) => record.surveyId === currentSurvey.id),
     [interviews, currentSurvey.id]
   );
+  const communitySurveyProgress = useMemo(() => {
+    const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase();
+    const communities = currentSurvey.communities ?? [];
+    const totalQuota = communities.reduce((total, community) => total + Math.max(0, Number(community.quota) || 0), 0);
+    const completed = currentSurveyInterviews.filter((record) =>
+      communities.some((community) => normalize(community.name) === normalize(record.community))
+    ).length;
+    const remaining = Math.max(0, totalQuota - completed);
+    const percentage = totalQuota > 0 ? Math.min(100, Math.round((completed / totalQuota) * 100)) : 0;
+    return { totalQuota, completed, remaining, percentage };
+  }, [currentSurvey.communities, currentSurveyInterviews]);
   const latestInterviewNotifications = useMemo(
-    () => [...interviews]
-      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+    () => mergeInterviewRecords([], currentSurveyInterviews)
       .slice(0, 5),
-    [interviews]
+    [currentSurveyInterviews]
   );
   const mayorVoteQuestion = useMemo(
     () => currentSurvey.questions.find((question) => {
@@ -957,6 +984,7 @@ export function App() {
     const newRecord: InterviewRecord = {
       id: folioId,
       surveyId: currentSurvey.id,
+      deviceUuid,
       communityId: selectedCommunity.id,
       surveyTitle: currentSurvey.title,
       enumeratorAlias: currentEnumeratorAlias,
@@ -1920,9 +1948,8 @@ export function App() {
     try {
       const loaded = await listInterviews();
       const pending = await getPendingInterviews();
-      const pendingRecords = pending.map((item) => item.record);
-      const pendingIds = new Set(pendingRecords.map((record) => record.id));
-      setInterviews([...pendingRecords, ...loaded.filter((record) => !pendingIds.has(record.id))]);
+      const pendingRecords = pending.map((item) => ({ ...item.record, deviceUuid: item.deviceUuid }));
+      setInterviews(mergeInterviewRecords(pendingRecords, loaded));
       setInterviewsApiError(null);
     } catch (error) {
       setInterviewsApiError(error instanceof Error ? error.message : 'No se pudieron actualizar las entrevistas.');
@@ -3176,7 +3203,7 @@ export function App() {
                 <div className="kpi-value">{currentSurveyInterviews.length}</div>
                 <div className="kpi-footer">
                   <CheckCircle2 size={13} style={{ color: '#10b981' }} />
-                  <span>Meta: {currentSurvey.targetSample} encuestas en {currentSurvey.municipality}</span>
+                  <span>Meta asignada a comunidades: {communitySurveyProgress.totalQuota.toLocaleString()} encuestas en {currentSurvey.municipality}</span>
                 </div>
               </div>
 
@@ -3208,14 +3235,24 @@ export function App() {
 
               <div className="kpi-card">
                 <div className="kpi-header">
-                  <span>GENERACIÓN PDF</span>
-                  <div className="kpi-icon" style={{ background: 'var(--amber-light)', color: '#fbbf24' }}>
-                    <FileText size={18} />
+                  <span>AVANCE DE ENCUESTAS</span>
+                  <div className="kpi-icon" style={{ background: 'var(--primary-light)', color: '#05a6f0' }}>
+                    <BarChart3 size={18} />
                   </div>
                 </div>
-                <div className="kpi-value">100%</div>
+                <div className="kpi-value">{communitySurveyProgress.percentage}%</div>
+                <div
+                  role="progressbar"
+                  aria-label="Avance de encuestas asignadas en comunidades"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={communitySurveyProgress.percentage}
+                  style={{ height: 7, margin: '0.55rem 0', borderRadius: 999, background: 'var(--border-color, #e2e8f0)', overflow: 'hidden' }}
+                >
+                  <div style={{ width: `${communitySurveyProgress.percentage}%`, height: '100%', borderRadius: 999, background: '#05a6f0', transition: 'width 250ms ease' }} />
+                </div>
                 <div className="kpi-footer">
-                  <span style={{ color: '#10b981' }}>Boletas individuales descargables</span>
+                  <span>{communitySurveyProgress.completed} realizadas · {communitySurveyProgress.remaining} pendientes de {communitySurveyProgress.totalQuota}</span>
                 </div>
               </div>
             </div>
@@ -3305,10 +3342,18 @@ export function App() {
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))', gap: '1rem' }}>
-                {currentSurvey.questions.map((question, questionIndex) => {
-                  const responses = currentSurveyInterviews
-                    .map((record) => record.answers.find((answer) => answer.questionId === question.id)?.answerText)
-                    .filter((answer): answer is string => Boolean(answer && answer !== 'Sin respuesta'));
+                {currentSurvey.questions
+                  .filter((question) => question.id !== mayorVoteQuestion?.id)
+                  .map((question) => {
+                  const questionIndex = currentSurvey.questions.findIndex((item) => item.id === question.id);
+                  const responseRecords = currentSurveyInterviews
+                    .map((record) => ({
+                      record,
+                      answer: record.answers.find((answer) => answer.questionId === question.id)?.answerText,
+                    }))
+                    .filter((item) => Boolean(item.answer && item.answer !== 'Sin respuesta'));
+                  const responses = responseRecords.map((item) => item.answer as string);
+                  const isFreeTextQuestion = question.type === 'text' || /observaciones/i.test(question.title);
                   const data = question.options.length
                     ? question.options.map((option) => ({
                         nombre: option.text,
@@ -3331,7 +3376,25 @@ export function App() {
                         <div style={{ fontSize: '0.85rem', fontWeight: 750, lineHeight: 1.4 }}>{question.title}</div>
                       </div>
                       <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginBottom: '0.25rem' }}>{total} respuestas</div>
-                      {data.length > 0 && total > 0 ? (
+                      {isFreeTextQuestion ? (
+                        responseRecords.length > 0 ? (
+                          <div style={{ maxHeight: 340, overflowY: 'auto', display: 'grid', gap: '.55rem', paddingRight: '.2rem' }}>
+                            {responseRecords.map(({ record, answer }) => (
+                              <article key={`${record.surveyId}-${record.id}-${question.id}`} style={{ padding: '.65rem .75rem', background: '#f4f9fc', border: '1px solid #d9edf7', borderRadius: 'var(--radius-sm)' }}>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: '.25rem .75rem', marginBottom: '.3rem', fontSize: '.72rem', color: 'var(--text-muted)' }}>
+                                  <strong style={{ color: '#087fb8' }}>{record.id} · {record.enumeratorName || record.enumeratorAlias}</strong>
+                                  <span>{record.community} · {formatGuatemalaDateTime(record.timestamp)}</span>
+                                </div>
+                                <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '.82rem', color: 'var(--text-main, #1f2933)' }}>{answer}</div>
+                              </article>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ minHeight: 110, display: 'grid', placeItems: 'center', textAlign: 'center', color: 'var(--text-muted)', fontSize: '.8rem' }}>
+                            No hay respuestas de texto registradas para esta pregunta.
+                          </div>
+                        )
+                      ) : data.length > 0 && total > 0 ? (
                         <div style={{ height: 260, width: '100%' }}>
                           <ResponsiveContainer width="100%" height="100%">
                             {dashboardChartType === 'bar' ? (

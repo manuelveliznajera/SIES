@@ -10,6 +10,7 @@ const answerSchema = z.object({
 const interviewSchema = z.object({
   id: z.string(),
   databaseId: z.string().optional(),
+  deviceUuid: z.string().optional(),
   surveyId: z.string(),
   communityId: z.string().optional(),
   surveyTitle: z.string(),
