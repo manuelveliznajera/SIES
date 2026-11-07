@@ -12,6 +12,7 @@ export const interviewInputSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   accuracy: z.number().min(0).max(100000),
+  startedAt: z.string().datetime().optional(),
   interviewedAt: z.string().datetime(),
   answers: z.array(z.object({
     questionId: z.string().uuid(),

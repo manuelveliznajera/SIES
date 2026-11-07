@@ -22,7 +22,12 @@ import {
   restoreSurvey as restoreSurveyRequest,
   updateSurvey as updateSurveyRequest,
 } from './surveysApi';
-import { createInterview as createInterviewRequest, listInterviews } from './interviewsApi';
+import {
+  clearSurveyInterviews,
+  createInterview as createInterviewRequest,
+  deleteInterview as deleteInterviewRequest,
+  listInterviews,
+} from './interviewsApi';
 import { getPendingInterviews, removePendingInterview, savePendingInterview } from './offlineInterviewsDb';
 import {
   listApplicationErrors,
@@ -88,6 +93,15 @@ const formatGuatemalaDateTime = (value: string) => {
     dateStyle: 'medium',
     timeStyle: 'short'
   }).format(date);
+};
+
+const formatElapsedTime = (startedAt: string, finishedAt: string) => {
+  const seconds = Math.max(0, Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000));
+  if (!Number.isFinite(seconds)) return '—';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return [hours ? `${hours} h` : '', minutes ? `${minutes} min` : '', `${remainingSeconds} s`].filter(Boolean).join(' ');
 };
 
 // ── GEOGRAFÍA DE GUATEMALA (DEPARTAMENTOS Y MUNICIPIOS) ──
@@ -310,7 +324,9 @@ export interface InterviewAnswer {
 
 export interface InterviewRecord {
   id: string;               // Ej: "User1-01", "User1-02", "User2-01"
+  databaseId?: string;
   surveyId: string;
+  communityId?: string;
   surveyTitle: string;
   enumeratorAlias: string;  // Ej: "User1"
   surveyNumber: number;     // Ej: 1, 2...
@@ -323,6 +339,7 @@ export interface InterviewRecord {
   lat: number;
   lng: number;
   accuracy: number;
+  startedAt?: string;
   timestamp: string;
   status: 'synced' | 'pending';
   answers: InterviewAnswer[];
@@ -379,6 +396,8 @@ export function App() {
   const [isSurveySaving, setIsSurveySaving] = useState(false);
   const [isInterviewsLoading, setIsInterviewsLoading] = useState(false);
   const [isInterviewSaving, setIsInterviewSaving] = useState(false);
+  const [isClearingSurveyRecords, setIsClearingSurveyRecords] = useState(false);
+  const [deletingInterviewId, setDeletingInterviewId] = useState<string | null>(null);
   const [savingAssignmentId, setSavingAssignmentId] = useState<string | null>(null);
   const [assignmentSurveyId, setAssignmentSurveyId] = useState('');
   const [newAssignedCommunityName, setNewAssignedCommunityName] = useState('');
@@ -714,10 +733,10 @@ export function App() {
       for (const item of pending) {
         if (cancelled || item.enumeratorUsername.toLowerCase() !== authenticatedSession.username.toLowerCase()) continue;
         try {
-          await createInterviewRequest(item.input);
+          const databaseId = await createInterviewRequest(item.input);
           await removePendingInterview(item.deviceUuid);
           setInterviews((previous) => previous.map((record) =>
-            record.id === item.record.id ? { ...record, status: 'synced' } : record
+            record.id === item.record.id ? { ...record, databaseId, status: 'synced' } : record
           ));
         } catch {
           // Mantener el registro local para reintentar cuando vuelva la conexión.
@@ -781,7 +800,7 @@ export function App() {
   // ── FUNCIÓN PARA OBTENER EL PRÓXIMO FOLIO CORRELATIVO (User1-01, User1-02...) ──
   const getNextSurveyNumber = (alias: string) => {
     const aliasSurveys = interviews.filter((i) => i.enumeratorAlias.trim().toLowerCase() === alias.trim().toLowerCase());
-    return aliasSurveys.length + 1;
+    return Math.max(0, ...aliasSurveys.map((interview) => interview.surveyNumber || 0)) + 1;
   };
 
   const getFormattedSurveyId = (alias: string, num: number) => {
@@ -794,13 +813,24 @@ export function App() {
   // ── FILTRADO EXCLUSIVO DE COMUNIDADES PARA EL ENCUESTADOR ACTIVO ──
   // "Un usuario puede tener 1 o más comunidades, pero no puede elegir una comunidad que ya fue asignada a otro"
   const userAssignedCommunities = currentSurvey.communities?.filter((c) => c.assignedTo === currentEnumeratorAlias) || [];
-
+  const getCommunityInterviewCount = (community: CommunityAssignment) => interviews.filter((record) =>
+    record.surveyId === currentSurvey.id &&
+    (record.communityId ? record.communityId === community.id : record.community.toLowerCase() === community.name.toLowerCase())
+  ).length;
   // Formulario de campo
   const [fieldCommunity, setFieldCommunity] = useState<string>('');
   const [fieldAnswers, setFieldAnswers] = useState<Record<string, string>>({});
   const [fieldAgeGroup, setFieldAgeGroup] = useState<string>('');
   const [fieldGender, setFieldGender] = useState<string>('');
+  const [interviewStartedAt, setInterviewStartedAt] = useState<string | null>(null);
   const [formSuccessMessage, setFormSuccessMessage] = useState<string | null>(null);
+  const selectedCommunityAssignment = userAssignedCommunities.find((community) => community.name === fieldCommunity);
+  const selectedCommunityQuotaReached = Boolean(selectedCommunityAssignment &&
+    getCommunityInterviewCount(selectedCommunityAssignment) >= selectedCommunityAssignment.quota);
+
+  const markInterviewStarted = () => {
+    setInterviewStartedAt((previous) => previous ?? new Date().toISOString());
+  };
 
   // Sincronizar comunidad por defecto cuando cambia la encuesta o el encuestador
   useEffect(() => {
@@ -815,9 +845,11 @@ export function App() {
       initial[q.id] = '';
     });
     setFieldAnswers(initial);
+    setInterviewStartedAt(null);
   }, [selectedSurveyId, currentEnumeratorAlias]);
 
   const handleSelectOption = (questionId: string, optionText: string) => {
+    markInterviewStarted();
     setFieldAnswers((prev) => ({
       ...prev,
       [questionId]: optionText
@@ -881,6 +913,15 @@ export function App() {
       });
       return;
     }
+    if (getCommunityInterviewCount(selectedCommunity) >= selectedCommunity.quota) {
+      void Swal.fire({
+        icon: 'warning',
+        title: 'Meta de comunidad alcanzada',
+        text: `La comunidad ${selectedCommunity.name} ya completó las ${selectedCommunity.quota} encuestas asignadas. Elige otra comunidad si todavía tiene cupo.`,
+        confirmButtonColor: '#05a6f0',
+      });
+      return;
+    }
 
     const surveyNum = getNextSurveyNumber(currentEnumeratorAlias);
     const folioId = getFormattedSurveyId(currentEnumeratorAlias, surveyNum);
@@ -898,6 +939,7 @@ export function App() {
 
     const deviceUuid = window.crypto.randomUUID();
     const interviewedAt = new Date().toISOString();
+    const startedAt = interviewStartedAt ?? interviewedAt;
     const writeInput = {
       deviceUuid,
       surveyId: currentSurvey.id,
@@ -908,12 +950,14 @@ export function App() {
       latitude: gpsLocation.lat,
       longitude: gpsLocation.lng,
       accuracy: gpsLocation.accuracy,
+      startedAt,
       interviewedAt,
       answers: answersList.map(({ questionId, answerText }) => ({ questionId, answerText }))
     };
     const newRecord: InterviewRecord = {
       id: folioId,
       surveyId: currentSurvey.id,
+      communityId: selectedCommunity.id,
       surveyTitle: currentSurvey.title,
       enumeratorAlias: currentEnumeratorAlias,
       surveyNumber: surveyNum,
@@ -926,6 +970,7 @@ export function App() {
       lat: gpsLocation.lat,
       lng: gpsLocation.lng,
       accuracy: gpsLocation.accuracy,
+      startedAt,
       timestamp: interviewedAt,
       status: 'synced',
       answers: answersList
@@ -933,6 +978,7 @@ export function App() {
 
     setIsInterviewSaving(true);
     let savedOffline = false;
+    let databaseId: string | undefined;
     try {
       if (!isOnline || !navigator.onLine) {
         await savePendingInterview({
@@ -945,7 +991,7 @@ export function App() {
         savedOffline = true;
       } else {
         try {
-          await createInterviewRequest(writeInput);
+          databaseId = await createInterviewRequest(writeInput);
         } catch (error) {
           if (!(error instanceof TypeError) && navigator.onLine) throw error;
           await savePendingInterview({
@@ -993,8 +1039,9 @@ export function App() {
       })
     );
 
-    setInterviews((previous) => [{ ...newRecord, status: savedOffline ? 'pending' : 'synced' }, ...previous]);
+    setInterviews((previous) => [{ ...newRecord, databaseId, status: savedOffline ? 'pending' : 'synced' }, ...previous]);
     setFieldAnswers(Object.fromEntries(currentSurvey.questions.map((question) => [question.id, ''])));
+    setInterviewStartedAt(null);
     setGpsLocation(null);
     setGpsUpdated(false);
     setGpsError(null);
@@ -1015,6 +1062,84 @@ export function App() {
     setTimeout(() => {
       setFormSuccessMessage(null);
     }, 4000);
+  };
+
+  const handleDeleteInterview = async (record: InterviewRecord) => {
+    if (currentUserRole !== 'admin' || !record.databaseId) return;
+    const confirmation = await Swal.fire({
+      icon: 'warning',
+      title: '¿Eliminar esta encuesta?',
+      text: `Se eliminarán el registro ${record.id} y sus respuestas de la base de datos.`,
+      showCancelButton: true,
+      confirmButtonText: 'Eliminar encuesta',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#b42318',
+    });
+    if (!confirmation.isConfirmed) return;
+
+    setDeletingInterviewId(record.databaseId);
+    try {
+      await deleteInterviewRequest(record.databaseId);
+      setInterviews((previous) => previous.filter((item) => item.databaseId !== record.databaseId));
+      setSurveys((previous) => previous.map((survey) => survey.id !== record.surveyId ? survey : {
+        ...survey,
+        collectedSample: Math.max(0, survey.collectedSample - 1),
+        questions: survey.questions.map((question) => ({
+          ...question,
+          options: question.options.map((option) => ({ ...option, votes: 0 })),
+        })),
+      }));
+      await Swal.fire({ icon: 'success', title: 'Encuesta eliminada', text: `Se eliminó ${record.id}.`, timer: 1600, showConfirmButton: false });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo eliminar', text: error instanceof Error ? error.message : 'Error al eliminar la encuesta.' });
+    } finally {
+      setDeletingInterviewId(null);
+    }
+  };
+
+  const handleClearSurveyRecords = async (survey: FullSurvey) => {
+    if (currentUserRole !== 'admin' || isClearingSurveyRecords) return;
+    const confirmation = await Swal.fire({
+      icon: 'warning',
+      title: 'Borrar todos los registros del estudio',
+      html: `Se eliminarán permanentemente todas las encuestas y respuestas de <strong>${survey.title}</strong>. El estudio y sus comunidades permanecerán. Escribe <strong>ELIMINAR</strong> para confirmar.`,
+      input: 'text',
+      inputPlaceholder: 'ELIMINAR',
+      inputValidator: (value) => value.trim().toUpperCase() === 'ELIMINAR' ? null : 'Escribe ELIMINAR para confirmar.',
+      showCancelButton: true,
+      confirmButtonText: 'Borrar registros',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#b42318',
+    });
+    if (!confirmation.isConfirmed) return;
+
+    setIsClearingSurveyRecords(true);
+    try {
+      const result = await clearSurveyInterviews(survey.id);
+      const pending = await getPendingInterviews();
+      await Promise.all(pending
+        .filter((item) => item.input.surveyId === survey.id)
+        .map((item) => removePendingInterview(item.deviceUuid)));
+      setInterviews((previous) => previous.filter((record) => record.surveyId !== survey.id));
+      setSurveys((previous) => previous.map((item) => item.id !== survey.id ? item : {
+        ...item,
+        collectedSample: 0,
+        questions: item.questions.map((question) => ({
+          ...question,
+          options: question.options.map((option) => ({ ...option, votes: 0 })),
+        })),
+      }));
+      await Swal.fire({
+        icon: 'success',
+        title: 'Estudio restablecido',
+        text: `Se eliminaron ${result.deletedCount} encuesta(s). El contador volvió a 0.`,
+        confirmButtonColor: '#05a6f0',
+      });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudieron borrar los registros', text: error instanceof Error ? error.message : 'Error al borrar los registros del estudio.' });
+    } finally {
+      setIsClearingSurveyRecords(false);
+    }
   };
 
   // ── GENERADOR DE BOLETA PDF OFICIAL ──
@@ -2070,7 +2195,7 @@ export function App() {
                 </div>
               )}
 
-              <form onSubmit={handleSaveInterview}>
+              <form onSubmit={handleSaveInterview} onFocusCapture={markInterviewStarted}>
                 {/* 1. SELECCIÓN DE COMUNIDAD ASIGNADA EXCLUSIVAMENTE POR EL ADMIN */}
                 <div className="field-territory-panel" style={{ background: '#f4f7f9', padding: '1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)', marginBottom: '1.5rem' }}>
                   <div className="field-territory-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
@@ -2093,6 +2218,7 @@ export function App() {
                       </label>
 
                       {userAssignedCommunities.length > 0 ? (
+                        <div>
                         <select
                           className="form-select"
                           value={fieldCommunity}
@@ -2101,11 +2227,19 @@ export function App() {
                           style={{ borderColor: '#05a6f0', fontWeight: 700, fontSize: '0.9rem' }}
                         >
                           {userAssignedCommunities.map((comm) => (
-                            <option key={comm.id} value={comm.name}>
-                              📍 {comm.name} (Meta asignada: {comm.quota} encuestas)
+                            <option key={comm.id} value={comm.name} disabled={getCommunityInterviewCount(comm) >= comm.quota}>
+                              📍 {comm.name} ({getCommunityInterviewCount(comm)}/{comm.quota} encuestas)
                             </option>
                           ))}
                         </select>
+                        {selectedCommunityAssignment && (
+                          <div style={{ marginTop: '.4rem', fontSize: '.75rem', color: selectedCommunityQuotaReached ? '#b42318' : 'var(--text-muted)' }}>
+                            {selectedCommunityQuotaReached
+                              ? `Meta alcanzada: ${selectedCommunityAssignment.quota} encuestas. Selecciona otra comunidad con cupo disponible.`
+                              : `Encuestas realizadas en esta comunidad: ${getCommunityInterviewCount(selectedCommunityAssignment)} de ${selectedCommunityAssignment.quota}.`}
+                          </div>
+                        )}
+                        </div>
                       ) : (
                         <div style={{ padding: '0.75rem 0.95rem', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.35)', borderRadius: 'var(--radius-sm)', color: '#fca5a5', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           <UserX size={18} style={{ color: '#ef4444' }} />
@@ -2326,7 +2460,7 @@ export function App() {
                 {/* BOTÓN REGISTRAR ENCUESTA */}
                 <button
                   type="submit"
-                  disabled={userAssignedCommunities.length === 0 || isInterviewSaving || isInterviewsLoading}
+                  disabled={userAssignedCommunities.length === 0 || selectedCommunityQuotaReached || isInterviewSaving || isInterviewsLoading}
                   className="btn btn-primary"
                   aria-busy={isInterviewSaving}
                   style={{
@@ -2334,8 +2468,8 @@ export function App() {
                     padding: '0.9rem',
                     fontSize: '1rem',
                     fontWeight: 800,
-                    opacity: userAssignedCommunities.length === 0 || isInterviewSaving || isInterviewsLoading ? 0.5 : 1,
-                    cursor: userAssignedCommunities.length === 0 || isInterviewSaving || isInterviewsLoading ? 'not-allowed' : 'pointer'
+                    opacity: userAssignedCommunities.length === 0 || selectedCommunityQuotaReached || isInterviewSaving || isInterviewsLoading ? 0.5 : 1,
+                    cursor: userAssignedCommunities.length === 0 || selectedCommunityQuotaReached || isInterviewSaving || isInterviewsLoading ? 'not-allowed' : 'pointer'
                   }}
                 >
                   {isInterviewSaving
@@ -3151,7 +3285,20 @@ export function App() {
                     Consulte cómo votó o encuestó cada persona por su No. de Encuesta (ej: User1-01) y descargue el PDF
                   </p>
                 </div>
-                <span className="badge badge-primary">{currentSurveyInterviews.length} Encuestas Registradas</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', flexWrap: 'wrap' }}>
+                  <span className="badge badge-primary">{currentSurveyInterviews.length} Encuestas Registradas</span>
+                  {currentUserRole === 'admin' && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.3)', fontSize: '.75rem' }}
+                      onClick={() => void handleClearSurveyRecords(currentSurvey)}
+                      disabled={isClearingSurveyRecords || currentSurveyInterviews.length === 0}
+                    >
+                      <Trash2 size={14} /> {isClearingSurveyRecords ? 'Borrando...' : 'Borrar registros del estudio'}
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="table-responsive">
@@ -3165,7 +3312,7 @@ export function App() {
                       <th>Fecha / Hora</th>
                       <th>Voto Alcalde</th>
                       <th>Voto Presidente</th>
-                      <th>Acción PDF</th>
+                      <th>Acciones</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3208,6 +3355,19 @@ export function App() {
                               >
                                 <Download size={12} /> PDF
                               </button>
+                              {currentUserRole === 'admin' && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteInterview(item)}
+                                  className="btn btn-secondary"
+                                  style={{ padding: '0.3rem 0.6rem', fontSize: '0.72rem', color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.28)' }}
+                                  title={item.databaseId ? 'Eliminar encuesta' : 'La encuesta debe sincronizarse antes de eliminarla'}
+                                  aria-label={`Eliminar encuesta ${item.id}`}
+                                  disabled={!item.databaseId || deletingInterviewId === item.databaseId}
+                                >
+                                  <Trash2 size={12} /> {deletingInterviewId === item.databaseId ? 'Borrando...' : 'Eliminar'}
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -3484,7 +3644,18 @@ export function App() {
                         Meta asignada: <strong style={{ color: '#05a6f0' }}>{totalQ}</strong> · Encuestas: <strong style={{ color: '#10b981' }}>{userInterviews.length}</strong>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-                        {comms.length ? comms.map((c) => <div key={c.id} style={{ minWidth: 0, background: '#f4f7f9', padding: '0.45rem 0.6rem', borderRadius: '4px', fontSize: '0.75rem', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'start', gap: '0.4rem' }}><span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>📍 {c.name}</span><span style={{ color: '#05a6f0', fontWeight: 700, whiteSpace: 'nowrap', textAlign: 'right' }}>{c.quota} encuestas</span></div>) : <span style={{ color: 'var(--text-muted)', fontSize: '.8rem' }}>Sin comunidades asignadas</span>}
+                        {comms.length ? comms.map((c) => {
+                          const completedInCommunity = interviews.filter((record) =>
+                            record.surveyId === assignmentSurvey.id &&
+                            (record.communityId ? record.communityId === c.id : record.community.toLowerCase() === c.name.toLowerCase())
+                          ).length;
+                          return <div key={c.id} style={{ minWidth: 0, background: '#f4f7f9', padding: '0.45rem 0.6rem', borderRadius: '4px', fontSize: '0.75rem', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'start', gap: '0.4rem' }}>
+                            <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>📍 {c.name}</span>
+                            <span style={{ color: completedInCommunity >= c.quota ? '#b42318' : '#05a6f0', fontWeight: 700, whiteSpace: 'nowrap', textAlign: 'right' }}>
+                              {completedInCommunity}/{c.quota} encuestas{completedInCommunity >= c.quota ? ' · Meta alcanzada' : ''}
+                            </span>
+                          </div>;
+                        }) : <span style={{ color: 'var(--text-muted)', fontSize: '.8rem' }}>Sin comunidades asignadas</span>}
                       </div>
                     </div>;
                 })}
@@ -3763,7 +3934,25 @@ export function App() {
                         <td>{event.entityType ?? '—'}</td>
                         <td>{event.ipAddress ?? '—'}</td>
                         <td title={event.userAgent ?? ''}>{event.origin || event.userAgent || '—'}</td>
-                        <td><details><summary>Ver</summary><pre className="admin-log-json">{JSON.stringify(event.changes ?? {}, null, 2)}</pre></details></td>
+                        <td>
+                          <details>
+                            <summary>Ver</summary>
+                            {event.action === 'interview.created' && typeof event.changes === 'object' && event.changes !== null ? (() => {
+                              const changes = event.changes as Record<string, unknown>;
+                              const startedAt = typeof changes.startedAt === 'string' ? changes.startedAt : null;
+                              const finishedAt = typeof changes.finishedAt === 'string' ? changes.finishedAt : null;
+                              return (
+                                <div className="admin-log-json">
+                                  <div><strong>Folio:</strong> {String(changes.folio ?? '—')}</div>
+                                  <div><strong>Inicio:</strong> {startedAt ? formatGuatemalaDateTime(startedAt) : 'No disponible'}</div>
+                                  <div><strong>Finalización:</strong> {finishedAt ? formatGuatemalaDateTime(finishedAt) : 'No disponible'}</div>
+                                  <div><strong>Duración:</strong> {startedAt && finishedAt ? formatElapsedTime(startedAt, finishedAt) : 'No disponible'}</div>
+                                  <pre>{JSON.stringify(event.changes, null, 2)}</pre>
+                                </div>
+                              );
+                            })() : <pre className="admin-log-json">{JSON.stringify(event.changes ?? {}, null, 2)}</pre>}
+                          </details>
+                        </td>
                       </tr>
                     ))}
                     {filteredAuditEvents.length === 0 && <tr><td colSpan={7} className="admin-logs-empty">{adminLogsLoading ? 'Cargando bitácora...' : 'No hay actividades que coincidan.'}</td></tr>}

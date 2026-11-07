@@ -9,7 +9,9 @@ const answerSchema = z.object({
 
 const interviewSchema = z.object({
   id: z.string(),
+  databaseId: z.string().optional(),
   surveyId: z.string(),
+  communityId: z.string().optional(),
   surveyTitle: z.string(),
   enumeratorAlias: z.string(),
   surveyNumber: z.number(),
@@ -23,6 +25,7 @@ const interviewSchema = z.object({
   lng: z.number(),
   accuracy: z.number(),
   timestamp: z.string(),
+  startedAt: z.string().optional(),
   status: z.enum(['synced', 'pending']),
   answers: z.array(answerSchema),
 });
@@ -42,8 +45,13 @@ export interface InterviewWriteInput {
   latitude: number;
   longitude: number;
   accuracy: number;
+  startedAt: string;
   interviewedAt: string;
   answers: Array<{ questionId: string; answerText: string }>;
+}
+
+export interface ClearSurveyInterviewsResult {
+  deletedCount: number;
 }
 
 async function authenticatedFetch(url: string, init: RequestInit = {}): Promise<Response> {
@@ -80,11 +88,22 @@ export async function listInterviews(): Promise<InterviewRecord[]> {
   return payload.interviews;
 }
 
-export async function createInterview(input: InterviewWriteInput): Promise<void> {
+export async function createInterview(input: InterviewWriteInput): Promise<string> {
   const response = await authenticatedFetch(`${apiBase}/interviews`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
-  await parseResponse(response, createResponseSchema);
+  const result = await parseResponse(response, createResponseSchema);
+  return result.interview.id;
+}
+
+export async function deleteInterview(interviewId: string): Promise<void> {
+  const response = await authenticatedFetch(`${apiBase}/interviews/${encodeURIComponent(interviewId)}`, { method: 'DELETE' });
+  await parseResponse(response, z.object({ success: z.literal(true), deleted: z.literal(true) }));
+}
+
+export async function clearSurveyInterviews(surveyId: string): Promise<ClearSurveyInterviewsResult> {
+  const response = await authenticatedFetch(`${apiBase}/interviews/survey/${encodeURIComponent(surveyId)}`, { method: 'DELETE' });
+  return parseResponse(response, z.object({ success: z.literal(true), deletedCount: z.number().int().nonnegative() }));
 }

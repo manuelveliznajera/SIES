@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
-import { interviewInputSchema } from './interviews.validators';
+import { interviewIdSchema, interviewInputSchema } from './interviews.validators';
 import { InterviewSubmissionError, interviewsService } from './interviews.service';
 import { publishInterviewCreated } from '../surveys/surveys.events';
 import { writeAuditEvent } from '../../services/observability';
@@ -23,7 +23,14 @@ export async function createInterview(req: Request, res: Response, next: NextFun
         action: 'interview.created',
         entityType: 'interview',
         entityId: interview.id,
-        changes: { folio: input.folio, surveyId: input.surveyId, communityId: input.communityId },
+        changes: {
+          folio: input.folio,
+          surveyId: input.surveyId,
+          communityId: input.communityId,
+          startedAt: input.startedAt ?? input.interviewedAt,
+          finishedAt: input.interviewedAt,
+          durationSeconds: Math.max(0, Math.round((new Date(input.interviewedAt).getTime() - new Date(input.startedAt ?? input.interviewedAt).getTime()) / 1000)),
+        },
       });
       publishInterviewCreated({
         id: interview.id,
@@ -45,6 +52,54 @@ export async function createInterview(req: Request, res: Response, next: NextFun
     }
     if (error instanceof InterviewSubmissionError) {
       res.status(error.status).json({ success: false, message: error.message, code: error.code });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function deleteInterview(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const interviewId = interviewIdSchema.parse(req.params.interviewId);
+    const deleted = await interviewsService.deleteOne(interviewId);
+    if (!deleted) {
+      res.status(404).json({ success: false, message: 'No se encontró la encuesta registrada.', code: 'INTERVIEW_NOT_FOUND' });
+      return;
+    }
+    await writeAuditEvent(req, {
+      action: 'interview.deleted',
+      entityType: 'interview',
+      entityId: deleted.id,
+      changes: { surveyId: deleted.survey_id, folio: deleted.folio },
+    });
+    res.status(200).json({ success: true, deleted: true });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      res.status(400).json({ success: false, message: 'El identificador de encuesta no es válido.', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function clearSurveyInterviews(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const surveyId = interviewIdSchema.parse(req.params.surveyId);
+    const result = await interviewsService.clearSurvey(surveyId);
+    if (!result) {
+      res.status(404).json({ success: false, message: 'No se encontró el estudio.', code: 'SURVEY_NOT_FOUND' });
+      return;
+    }
+    await writeAuditEvent(req, {
+      action: 'survey.interviews_cleared',
+      entityType: 'survey',
+      entityId: surveyId,
+      changes: { deletedCount: result.deletedCount },
+    });
+    res.status(200).json({ success: true, deletedCount: result.deletedCount });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      res.status(400).json({ success: false, message: 'El identificador del estudio no es válido.', code: 'VALIDATION_ERROR' });
       return;
     }
     next(error);

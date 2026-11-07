@@ -7,6 +7,7 @@ interface InterviewRow {
   device_uuid: string;
   folio: string | null;
   survey_id: string;
+  community_id: string;
   survey_title: string;
   department: string;
   municipality: string;
@@ -47,7 +48,9 @@ function mapInterview(row: InterviewRow) {
   const sequence = Number(folio.match(/-(\d+)$/)?.[1] ?? 0);
   return {
     id: folio,
+    databaseId: row.id,
     surveyId: row.survey_id,
+    communityId: row.community_id,
     surveyTitle: row.survey_title,
     enumeratorAlias: row.enumerator_alias,
     surveyNumber: sequence,
@@ -71,7 +74,7 @@ export class InterviewsService {
     const canViewAll = roles.includes('ADMIN') || roles.includes('SUPERVISOR');
     const result = await query<InterviewRow>(
       `SELECT i.id, i.device_uuid, i.device_info->>'folio' AS folio,
-              i.survey_id, s.name AS survey_title, d.name AS department,
+              i.survey_id, i.community_id, s.name AS survey_title, d.name AS department,
               m.name AS municipality, u.username AS enumerator_alias,
               u.full_name AS enumerator_name,
               c.name AS community,
@@ -126,10 +129,13 @@ export class InterviewsService {
         assignment_id: string;
         enumerator_id: string;
         community_id: string;
+        interview_goal: number;
         survey_version_id: string;
         version_number: number;
+        assigned_user_id: string;
       }>(
         `SELECT a.id AS assignment_id, a.enumerator_id, a.community_id,
+                a.interview_goal, e.user_id AS assigned_user_id,
                 sv.id AS survey_version_id, s.current_version AS version_number
          FROM survey_assignments a
          JOIN surveys s ON s.id = a.survey_id AND s.status = 'active'
@@ -137,18 +143,36 @@ export class InterviewsService {
          JOIN enumerators e ON e.id = a.enumerator_id
          WHERE a.survey_id = $1 AND a.community_id = $2
            AND a.status IN ('pending', 'active')
-           AND ($3::boolean OR e.user_id = $4)
-         LIMIT 1`,
-        [input.surveyId, input.communityId, isAdmin, userId]
+         ORDER BY a.id
+         FOR UPDATE OF a`,
+        [input.surveyId, input.communityId]
       );
-      if (!assignmentResult.rowCount) {
+      const assignment = assignmentResult.rows.find((row) => isAdmin || row.assigned_user_id === userId);
+      if (!assignment) {
         throw new InterviewSubmissionError(
           'No tienes una asignación activa para esta comunidad y encuesta.',
           403,
           'ASSIGNMENT_NOT_AVAILABLE'
         );
       }
-      const assignment = assignmentResult.rows[0];
+      // Revisa duplicados después de bloquear la asignación para que los reintentos
+      // de sincronización sigan siendo idempotentes incluso al alcanzar la cuota.
+      const duplicate = await client.query<{ id: string }>(
+        `SELECT id FROM interviews WHERE device_uuid = $1`, [input.deviceUuid]
+      );
+      if (duplicate.rowCount) return { id: duplicate.rows[0].id, duplicate: true };
+
+      const completedCount = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM interviews WHERE survey_id = $1 AND community_id = $2`,
+        [input.surveyId, assignment.community_id]
+      );
+      if (Number(completedCount.rows[0]?.count ?? 0) >= assignment.interview_goal) {
+        throw new InterviewSubmissionError(
+          `La meta de ${assignment.interview_goal} encuestas para esta comunidad ya se alcanzó.`,
+          409,
+          'COMMUNITY_QUOTA_REACHED'
+        );
+      }
 
       const questionResult = await client.query<QuestionRow>(
         `SELECT q.id, q.question_text, q.question_type::text AS question_type,
@@ -271,6 +295,33 @@ export class InterviewsService {
       }
 
       return { id: interviewId, duplicate: false };
+    });
+  }
+
+  async deleteOne(interviewId: string) {
+    const result = await query<{ id: string; survey_id: string; folio: string | null }>(
+      `DELETE FROM interviews i
+       WHERE i.id = $1
+       RETURNING i.id, i.survey_id, i.device_info->>'folio' AS folio`,
+      [interviewId]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async clearSurvey(surveyId: string) {
+    return withTransaction(async (client) => {
+      const survey = await client.query<{ status: string }>(
+        `SELECT status FROM surveys WHERE id = $1 FOR UPDATE`, [surveyId]
+      );
+      if (!survey.rowCount) return null;
+
+      // Espera a que terminen los envíos que ya tienen bloqueada la asignación.
+      await client.query(`SELECT id FROM survey_assignments WHERE survey_id = $1 FOR UPDATE`, [surveyId]);
+
+      const deleted = await client.query(
+        `DELETE FROM interviews WHERE survey_id = $1`, [surveyId]
+      );
+      return { surveyId, deletedCount: deleted.rowCount ?? 0 };
     });
   }
 }
