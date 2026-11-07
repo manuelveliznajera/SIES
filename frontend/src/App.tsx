@@ -1142,6 +1142,98 @@ export function App() {
     }
   };
 
+  const generateCommunityAssignmentsPdf = async (survey: FullSurvey) => {
+    const doc = new jsPDF({ orientation: 'landscape' });
+    const communities = survey.communities;
+    const totalQuota = communities.reduce((sum, community) => sum + community.quota, 0);
+    const assignedAliases = Array.from(new Set(communities
+      .map((community) => community.assignedTo.trim().toLowerCase())
+      .filter(Boolean)));
+    const surveyInterviews = interviews.filter((record) => record.surveyId === survey.id);
+    const rows = communities.map((community, index) => {
+      const assignedUser = usersList.find((user) => user.alias.toLowerCase() === community.assignedTo.toLowerCase());
+      const completed = surveyInterviews.filter((record) =>
+        record.communityId
+          ? record.communityId === community.id
+          : record.community.toLowerCase() === community.name.toLowerCase()
+      ).length;
+      return [
+        String(index + 1),
+        community.name,
+        assignedUser ? `${assignedUser.fullName} (@${assignedUser.alias})` : community.assignedTo,
+        String(community.quota),
+        String(completed),
+        String(Math.max(0, community.quota - completed)),
+      ];
+    });
+
+    const previewWindow = window.open('', '_blank');
+    doc.setProperties({ title: `Asignaciones - ${survey.title}`, subject: 'Comunidades y metas asignadas' });
+    doc.setFillColor(5, 126, 184);
+    doc.rect(0, 0, 297, 28, 'F');
+    try {
+      const logoImage = new Image();
+      await new Promise<void>((resolve, reject) => {
+        logoImage.onload = () => resolve();
+        logoImage.onerror = () => reject(new Error('No se pudo cargar el logo'));
+        logoImage.src = '/logo.png';
+      });
+      doc.addImage(logoImage, 'PNG', 270, 3, 22, 22);
+    } catch {
+      // El reporte se genera aunque el logo no esté disponible.
+    }
+
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.text('COMUNIDADES Y ASIGNACIONES', 14, 12);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.text(`${survey.title} · ${survey.municipality}, ${survey.department}`, 14, 20);
+
+    doc.setTextColor(31, 41, 51);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text(`Comunidades: ${communities.length}`, 14, 39);
+    doc.text(`Encuestadores asignados: ${assignedAliases.length}`, 76, 39);
+    doc.text(`Meta total: ${totalQuota} encuestas`, 155, 39);
+    doc.text(`Realizadas: ${surveyInterviews.length}`, 14, 47);
+    doc.text(`Generado: ${formatGuatemalaDateTime(new Date().toISOString())}`, 76, 47);
+
+    autoTable(doc, {
+      startY: 54,
+      head: [['#', 'Comunidad / aldea', 'Encuestador asignado', 'Meta', 'Realizadas', 'Pendientes']],
+      body: rows,
+      theme: 'grid',
+      headStyles: { fillColor: [5, 126, 184], textColor: 255, fontStyle: 'bold', fontSize: 9 },
+      bodyStyles: { textColor: [31, 41, 51], fontSize: 9, cellPadding: 3 },
+      columnStyles: {
+        0: { cellWidth: 12, halign: 'center' },
+        1: { cellWidth: 70 },
+        2: { cellWidth: 95 },
+        3: { cellWidth: 26, halign: 'right' },
+        4: { cellWidth: 30, halign: 'right' },
+        5: { cellWidth: 30, halign: 'right' },
+      },
+      didDrawPage: () => {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(100, 116, 139);
+        doc.text('AMTECHNOLOGY · Reporte de comunidades asignadas', 14, 202);
+        doc.text(`Página ${doc.getNumberOfPages()}`, 283, 202, { align: 'right' });
+      },
+    });
+
+    const fileName = `Asignaciones_${survey.municipality.replace(/[^a-z0-9]+/gi, '_')}.pdf`;
+    const pdfUrl = URL.createObjectURL(doc.output('blob'));
+    if (previewWindow) {
+      previewWindow.location.href = pdfUrl;
+      window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 60_000);
+    } else {
+      doc.save(fileName);
+    }
+  };
+
   // ── GENERADOR DE BOLETA PDF OFICIAL ──
   const generateInterviewPdf = async (record: InterviewRecord) => {
     const doc = new jsPDF();
@@ -3596,6 +3688,16 @@ export function App() {
             <div className="glass-panel" style={{ marginBottom: '1.5rem' }}>
               {(() => {
                 const assignmentSurvey = surveys.find((survey) => survey.id === assignmentSurveyId);
+                const assignedCommunities = assignmentSurvey?.communities ?? [];
+                const totalCommunityQuota = assignedCommunities.reduce((sum, community) => sum + community.quota, 0);
+                const assignedEnumeratorCount = new Set(assignedCommunities.map((community) => community.assignedTo.trim().toLowerCase()).filter(Boolean)).size;
+                const assignedSurveyInterviews = interviews.filter((record) => record.surveyId === assignmentSurveyId);
+                const totalRemainingQuota = assignedCommunities.reduce((sum, community) => {
+                  const completed = assignedSurveyInterviews.filter((record) => record.communityId
+                    ? record.communityId === community.id
+                    : record.community.toLowerCase() === community.name.toLowerCase()).length;
+                  return sum + Math.max(0, community.quota - completed);
+                }, 0);
                 return <>
               <div className="panel-header">
                 <div>
@@ -3615,8 +3717,28 @@ export function App() {
 
               {!assignmentSurveyId && <div className="empty-state">Selecciona un estudio guardado para ver sus comunidades.</div>}
               {assignmentSurveyId && assignmentSurvey && <>
-              <div style={{ margin: '1rem 0', padding: '0.85rem 1rem', background: '#f4f7f9', borderRadius: 'var(--radius-sm)' }}>
-                <strong>{assignmentSurvey.title}</strong><span style={{ color: 'var(--text-muted)' }}> · {assignmentSurvey.department} · {assignmentSurvey.municipality} · {assignmentSurvey.status === 'active' ? 'Activo' : assignmentSurvey.status === 'draft' ? 'Borrador' : 'Completado'}</span>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '.8rem', margin: '1rem 0', padding: '0.85rem 1rem', background: '#f4f7f9', borderRadius: 'var(--radius-sm)' }}>
+                <div>
+                  <strong>{assignmentSurvey.title}</strong><span style={{ color: 'var(--text-muted)' }}> · {assignmentSurvey.department} · {assignmentSurvey.municipality} · {assignmentSurvey.status === 'active' ? 'Activo' : assignmentSurvey.status === 'draft' ? 'Borrador' : 'Completado'}</span>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={() => void generateCommunityAssignmentsPdf(assignmentSurvey)}>
+                  <Printer size={16} /> Ver / imprimir PDF
+                </button>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: '.75rem', marginBottom: '1rem' }}>
+                {[
+                  { label: 'Comunidades asignadas', value: assignedCommunities.length, color: '#05a6f0' },
+                  { label: 'Encuestadores asignados', value: assignedEnumeratorCount, color: '#7c3aed' },
+                  { label: 'Meta total de encuestas', value: totalCommunityQuota, color: '#087a55' },
+                  { label: 'Encuestas realizadas', value: assignedSurveyInterviews.length, color: '#0891b2' },
+                  { label: 'Encuestas pendientes', value: totalRemainingQuota, color: '#d97706' },
+                ].map((stat) => (
+                  <div key={stat.label} style={{ minWidth: 0, padding: '.85rem 1rem', background: '#fff', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)' }}>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '.73rem' }}>{stat.label}</div>
+                    <strong style={{ display: 'block', marginTop: '.25rem', color: stat.color, fontSize: '1.25rem' }}>{stat.value}</strong>
+                  </div>
+                ))}
               </div>
 
               {currentUserRole === 'admin' && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 2fr) minmax(130px, 1fr) minmax(200px, 1fr) auto', gap: '.75rem', alignItems: 'end', padding: '1rem', marginBottom: '1rem', background: '#f4f7f9', borderRadius: 'var(--radius-sm)' }}>
