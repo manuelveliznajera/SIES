@@ -37,7 +37,7 @@ import {
   type ApplicationErrorRecord,
   type AuditEventRecord,
 } from './adminLogsApi';
-import { createCommunityAssignment, updateCommunityAssignment } from './assignmentsApi';
+import { createCommunityAssignment, updateCommunityAssignment, updateCommunityQuota } from './assignmentsApi';
 import { downloadDatabaseBackup, resetDatabaseData as resetDatabaseDataRequest, restoreDatabaseBackup as restoreDatabaseBackupRequest } from './databaseBackupApi';
 import {
   Vote,
@@ -1646,6 +1646,51 @@ export function App() {
       await Swal.fire({ icon: 'success', title: 'Cambios guardados', timer: 1400, showConfirmButton: false });
     } catch (error) {
       await Swal.fire({ icon: 'error', title: 'No se pudo editar', text: error instanceof Error ? error.message : 'Error al guardar los cambios.' });
+    } finally {
+      setSavingAssignmentId(null);
+    }
+  };
+
+  const handleEditCommunityQuota = async (community: CommunityAssignment) => {
+    const survey = surveys.find((item) => item.id === assignmentSurveyId);
+    if (!survey || currentUserRole !== 'admin' || survey.status === 'archived') return;
+    const completedCount = interviews.filter((record) => record.surveyId === survey.id && (
+      record.communityId ? record.communityId === community.id : record.community.toLowerCase() === community.name.toLowerCase()
+    )).length;
+    const result = await Swal.fire({
+      title: 'Editar meta de encuestas',
+      text: `${community.name} · ${completedCount} encuestas realizadas.`,
+      input: 'number',
+      inputLabel: 'Nueva cantidad asignada',
+      inputValue: community.quota,
+      inputAttributes: { min: '0', max: '1000000', step: '1' },
+      showCancelButton: true,
+      confirmButtonText: 'Guardar meta',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#05a6f0',
+      inputValidator: (value) => Number.isInteger(Number(value)) && Number(value) >= 0 && Number(value) <= 1000000
+        ? null
+        : 'Ingresa una cantidad entera entre 0 y 1,000,000.',
+    });
+    if (!result.isConfirmed) return;
+
+    const quota = Number(result.value);
+    setSavingAssignmentId(community.id);
+    try {
+      await updateCommunityQuota(survey.id, community.id, quota);
+      setSurveys((previous) => previous.map((item) => item.id !== survey.id ? item : {
+        ...item,
+        communities: item.communities.map((entry) => entry.id === community.id ? { ...entry, quota } : entry),
+      }));
+      await Swal.fire({
+        icon: 'success',
+        title: 'Meta actualizada',
+        text: `${community.name}: ${quota} encuestas asignadas. Las ${completedCount} encuestas ya realizadas se conservaron.`,
+        timer: 2400,
+        showConfirmButton: false,
+      });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo actualizar la meta', text: error instanceof Error ? error.message : 'Error al guardar la cantidad.' });
     } finally {
       setSavingAssignmentId(null);
     }
@@ -4283,7 +4328,22 @@ export function App() {
                       {assignmentSurvey.communities.map((c) => (
                         <tr key={c.id}>
                           <td data-label="Comunidad / Aldea" style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>📍 {c.name}</td>
-                          <td data-label="Meta Cuota">{c.quota} encuestas</td>
+                          <td data-label="Meta Cuota">
+                            <div style={{ display: 'grid', gap: '.35rem', justifyItems: 'start' }}>
+                              <span>{c.quota} encuestas</span>
+                              {currentUserRole === 'admin' && (
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  onClick={() => void handleEditCommunityQuota(c)}
+                                  disabled={savingAssignmentId === c.id || assignmentSurvey.status === 'archived'}
+                                  style={{ padding: '.3rem .5rem', fontSize: '.72rem', color: '#087aaf', borderColor: 'rgba(5, 166, 240, .3)', whiteSpace: 'nowrap' }}
+                                >
+                                  <Pencil size={13} /> {savingAssignmentId === c.id ? 'Guardando...' : 'Editar meta'}
+                                </button>
+                              )}
+                            </div>
+                          </td>
                           <td data-label="Encuestador asignado">
                             <span className="survey-id-badge" style={{ fontSize: '0.75rem' }}>
                               {activeEnumerators.find((user) => user.alias.toLowerCase() === c.assignedTo.toLowerCase())?.fullName ?? c.assignedTo} (@{c.assignedTo})

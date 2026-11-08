@@ -162,11 +162,11 @@ export class SurveysService {
          JOIN enumerators e ON e.id = a.enumerator_id
          JOIN users u ON u.id = e.user_id
          WHERE a.survey_id = ANY($1::uuid[])
-           AND (a.status IN ('pending', 'active') OR a.survey_id = ANY($2::uuid[]))
+           AND ($2::boolean OR a.status IN ('pending', 'active'))
          ORDER BY a.survey_id, c.id,
                   CASE WHEN a.status IN ('pending', 'active') THEN 0 ELSE 1 END,
                   a.created_at DESC`,
-        [surveyIds, surveyResult.rows.filter((survey) => survey.status === 'archived').map((survey) => survey.id)]
+        [surveyIds, isAdmin]
       ),
     ]);
 
@@ -482,7 +482,7 @@ export class SurveysService {
        JOIN communities c ON c.id = a.community_id
        JOIN enumerators e ON e.id = a.enumerator_id
        JOIN users u ON u.id = e.user_id
-       WHERE a.survey_id = $1 AND a.status IN ('pending', 'active')
+       WHERE a.survey_id = $1 AND a.status IN ('pending', 'active', 'completed')
        ORDER BY c.name`,
       [surveyId]
     );

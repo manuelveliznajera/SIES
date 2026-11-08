@@ -13,6 +13,40 @@ async function findEnumerator(client: import('pg').PoolClient, alias: string): P
 }
 
 export const assignmentsService = {
+  async updateQuota(surveyId: string, communityId: string, quota: number) {
+    return withTransaction(async (client) => {
+      const survey = await client.query<{ status: string }>('SELECT status FROM surveys WHERE id = $1 FOR UPDATE', [surveyId]);
+      if (!survey.rowCount) return { kind: 'survey_missing' as const };
+      if (survey.rows[0].status === 'archived') return { kind: 'survey_closed' as const };
+
+      const assignment = await client.query<{ id: string; status: string }>(
+        `SELECT id, status
+         FROM survey_assignments
+         WHERE survey_id = $1 AND community_id = $2
+           AND status IN ('pending', 'active', 'completed')
+         ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, created_at DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [surveyId, communityId]
+      );
+      if (!assignment.rowCount) return { kind: 'community_missing' as const };
+
+      const completed = await client.query<{ count: number }>(
+        'SELECT COUNT(*)::integer AS count FROM interviews WHERE assignment_id = $1',
+        [assignment.rows[0].id]
+      );
+      const shouldReactivate = assignment.rows[0].status === 'completed'
+        && survey.rows[0].status === 'active'
+        && quota > Number(completed.rows[0]?.count ?? 0);
+      const status = shouldReactivate ? 'active' : assignment.rows[0].status;
+      await client.query(
+        'UPDATE survey_assignments SET interview_goal = $2, status = $3::assignment_status WHERE id = $1',
+        [assignment.rows[0].id, quota, status]
+      );
+      return { kind: 'ok' as const, quota, status };
+    });
+  },
+
   async reassign(surveyId: string, communityId: string, name: string, alias: string, quota: number, assignedBy: string) {
     return withTransaction(async (client) => {
       const survey = await client.query<{ status: string }>('SELECT status FROM surveys WHERE id = $1 FOR UPDATE', [surveyId]);

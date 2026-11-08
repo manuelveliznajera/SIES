@@ -12,6 +12,33 @@ assignmentsRouter.get('/health', (_req, res) => {
   res.json({ success: true, module: 'assignments', status: 'ready' });
 });
 
+assignmentsRouter.patch('/:surveyId/:communityId/quota', authorize(['ADMIN']), async (req, res, next) => {
+  try {
+    const id = z.string().uuid();
+    const surveyId = id.parse(req.params.surveyId);
+    const communityId = id.parse(req.params.communityId);
+    const input = z.object({ quota: z.number().int().min(0).max(1000000) }).parse(req.body);
+    const result = await assignmentsService.updateQuota(surveyId, communityId, input.quota);
+    const errors: Record<string, { status: number; message: string; code: string }> = {
+      survey_missing: { status: 404, message: 'Estudio no encontrado.', code: 'SURVEY_NOT_FOUND' },
+      survey_closed: { status: 409, message: 'No se pueden modificar metas de un estudio archivado.', code: 'SURVEY_CLOSED' },
+      community_missing: { status: 404, message: 'No se encontró una asignación activa para esta comunidad.', code: 'ASSIGNMENT_NOT_FOUND' },
+    };
+    if (result.kind !== 'ok') {
+      const error = errors[result.kind];
+      res.status(error.status).json({ success: false, message: error.message, code: error.code });
+      return;
+    }
+    res.json({ success: true, quota: result.quota, status: result.status });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, message: 'La meta debe ser un número entero entre 0 y 1,000,000.', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    next(error);
+  }
+});
+
 assignmentsRouter.patch('/:surveyId/:communityId', authorize(['ADMIN']), async (req, res, next) => {
   try {
     const id = z.string().uuid();
