@@ -162,7 +162,7 @@ export class SurveysService {
          JOIN enumerators e ON e.id = a.enumerator_id
          JOIN users u ON u.id = e.user_id
          WHERE a.survey_id = ANY($1::uuid[])
-           AND ($2::boolean OR a.status IN ('pending', 'active'))
+           AND (a.status IN ('pending', 'active') OR ($2::boolean AND a.status = 'completed'))
          ORDER BY a.survey_id, c.id,
                   CASE WHEN a.status IN ('pending', 'active') THEN 0 ELSE 1 END,
                   a.created_at DESC`,

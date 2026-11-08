@@ -12,6 +12,48 @@ assignmentsRouter.get('/health', (_req, res) => {
   res.json({ success: true, module: 'assignments', status: 'ready' });
 });
 
+assignmentsRouter.get('/survey/:surveyId/summary', authorize(['ADMIN']), async (req, res, next) => {
+  try {
+    const surveyId = z.string().uuid().parse(req.params.surveyId);
+    const result = await assignmentsService.listSurveyAssignments(surveyId);
+    if (result.kind === 'survey_missing') {
+      res.status(404).json({ success: false, message: 'Estudio no encontrado.', code: 'SURVEY_NOT_FOUND' });
+      return;
+    }
+    res.json({ success: true, totalAssignedQuota: result.totalAssignedQuota, assignments: result.assignments });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, message: 'El identificador del estudio no es válido.', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    next(error);
+  }
+});
+
+assignmentsRouter.delete('/:surveyId/:communityId', authorize(['ADMIN']), async (req, res, next) => {
+  try {
+    const id = z.string().uuid();
+    const surveyId = id.parse(req.params.surveyId);
+    const communityId = id.parse(req.params.communityId);
+    const result = await assignmentsService.removeCommunityFromSurvey(surveyId, communityId);
+    if (result.kind === 'survey_missing') {
+      res.status(404).json({ success: false, message: 'Estudio no encontrado.', code: 'SURVEY_NOT_FOUND' });
+      return;
+    }
+    if (result.kind === 'assignment_missing') {
+      res.status(404).json({ success: false, message: 'No se encontró la asignación de esta comunidad.', code: 'ASSIGNMENT_NOT_FOUND' });
+      return;
+    }
+    res.json({ success: true, cancelledAssignmentCount: result.cancelledAssignmentCount });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, message: 'Los identificadores de estudio o comunidad no son válidos.', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    next(error);
+  }
+});
+
 assignmentsRouter.patch('/:surveyId/:communityId/quota', authorize(['ADMIN']), async (req, res, next) => {
   try {
     const id = z.string().uuid();

@@ -13,6 +13,80 @@ async function findEnumerator(client: import('pg').PoolClient, alias: string): P
 }
 
 export const assignmentsService = {
+  async listSurveyAssignments(surveyId: string) {
+    return withTransaction(async (client) => {
+      const survey = await client.query<{ id: string }>('SELECT id FROM surveys WHERE id = $1', [surveyId]);
+      if (!survey.rowCount) return { kind: 'survey_missing' as const };
+
+      const result = await client.query<{
+        assignment_id: string;
+        community_id: string;
+        community: string;
+        assigned_to: string;
+        quota: number;
+        status: string;
+        completed_interviews: number;
+      }>(
+        `SELECT a.id AS assignment_id, c.id AS community_id,
+                COALESCE(NULLIF(a.community_name, ''), c.name) AS community,
+                u.username AS assigned_to, a.interview_goal AS quota,
+                a.status::text AS status,
+                COUNT(i.id) FILTER (WHERE i.status = 'completed')::integer AS completed_interviews
+         FROM survey_assignments a
+         JOIN communities c ON c.id = a.community_id
+         JOIN enumerators e ON e.id = a.enumerator_id
+         JOIN users u ON u.id = e.user_id
+         LEFT JOIN interviews i ON i.assignment_id = a.id
+         WHERE a.survey_id = $1
+         GROUP BY a.id, c.id, c.name, u.username
+         ORDER BY LOWER(COALESCE(NULLIF(a.community_name, ''), c.name)),
+                  CASE a.status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 WHEN 'completed' THEN 2 ELSE 3 END,
+                  u.username`,
+        [surveyId]
+      );
+
+      const assignments = result.rows.map((row) => ({
+        assignmentId: row.assignment_id,
+        communityId: row.community_id,
+        community: row.community,
+        assignedTo: row.assigned_to,
+        quota: row.quota,
+        status: row.status,
+        completedInterviews: row.completed_interviews,
+      }));
+      const totalAssignedQuota = assignments.reduce(
+        (total, assignment) => total + (['pending', 'active', 'completed'].includes(assignment.status) ? assignment.quota : 0),
+        0
+      );
+      return { kind: 'ok' as const, assignments, totalAssignedQuota };
+    });
+  },
+
+  async removeCommunityFromSurvey(surveyId: string, communityId: string) {
+    return withTransaction(async (client) => {
+      const survey = await client.query<{ id: string }>('SELECT id FROM surveys WHERE id = $1 FOR UPDATE', [surveyId]);
+      if (!survey.rowCount) return { kind: 'survey_missing' as const };
+
+      const assignments = await client.query<{ id: string }>(
+        `SELECT id FROM survey_assignments
+         WHERE survey_id = $1 AND community_id = $2
+           AND status IN ('pending', 'active', 'completed')
+         ORDER BY id
+         FOR UPDATE`,
+        [surveyId, communityId]
+      );
+      if (!assignments.rowCount) return { kind: 'assignment_missing' as const };
+
+      const assignmentIds = assignments.rows.map((assignment) => assignment.id);
+      await client.query(
+        `UPDATE survey_assignments SET status = 'cancelled'
+         WHERE id = ANY($1::uuid[])`,
+        [assignmentIds]
+      );
+      return { kind: 'ok' as const, cancelledAssignmentCount: assignmentIds.length };
+    });
+  },
+
   async updateQuota(surveyId: string, communityId: string, quota: number) {
     return withTransaction(async (client) => {
       const survey = await client.query<{ status: string }>('SELECT status FROM surveys WHERE id = $1 FOR UPDATE', [surveyId]);
@@ -120,7 +194,13 @@ export const assignmentsService = {
       const status = survey.rows[0].status === 'active' ? 'active' : 'pending';
       const assignment = await client.query<{ id: string }>(
         `INSERT INTO survey_assignments (survey_id, community_id, community_name, enumerator_id, assigned_by, interview_goal, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::assignment_status) RETURNING id`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7::assignment_status)
+         ON CONFLICT (survey_id, community_id, enumerator_id)
+         DO UPDATE SET community_name = EXCLUDED.community_name,
+                       assigned_by = EXCLUDED.assigned_by,
+                       interview_goal = EXCLUDED.interview_goal,
+                       status = EXCLUDED.status
+         RETURNING id`,
         [surveyId, community.rows[0].id, name, enumeratorId, assignedBy, quota, status]
       );
       return { kind: 'ok' as const, id: community.rows[0].id, assignmentId: assignment.rows[0].id, assignedTo: alias, quota, name };

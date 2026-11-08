@@ -37,7 +37,7 @@ import {
   type ApplicationErrorRecord,
   type AuditEventRecord,
 } from './adminLogsApi';
-import { createCommunityAssignment, updateCommunityAssignment, updateCommunityQuota } from './assignmentsApi';
+import { createCommunityAssignment, listSurveyAssignments, removeCommunityAssignment, updateCommunityAssignment, updateCommunityQuota, type SurveyAssignmentSummary } from './assignmentsApi';
 import { downloadDatabaseBackup, resetDatabaseData as resetDatabaseDataRequest, restoreDatabaseBackup as restoreDatabaseBackupRequest } from './databaseBackupApi';
 import {
   Vote,
@@ -559,6 +559,10 @@ export function App() {
     folio: '', enumerator: '', community: '', mayorVote: '',
   });
   const [interviewTablePage, setInterviewTablePage] = useState(1);
+  const [dashboardAssignmentSummary, setDashboardAssignmentSummary] = useState<Omit<SurveyAssignmentSummary, 'success'> | null>(null);
+  const [dashboardAssignmentsLoading, setDashboardAssignmentsLoading] = useState(false);
+  const [dashboardAssignmentsError, setDashboardAssignmentsError] = useState<string | null>(null);
+  const [dashboardAssignmentPage, setDashboardAssignmentPage] = useState(1);
 
   // ── BASE DE DATOS DE ENCUESTAS (CON COMUNIDADES ASIGNADAS POR ADMIN) ──
   const [surveys, setSurveys] = useState<FullSurvey[]>([]);
@@ -567,6 +571,34 @@ export function App() {
   const [selectedSurveyId, setSelectedSurveyId] = useState<string>('');
   const activeSurveys = useMemo(() => surveys.filter((survey) => survey.status === 'active'), [surveys]);
   const currentSurvey = activeSurveys.find((survey) => survey.id === selectedSurveyId) || activeSurveys[0] || EMPTY_SURVEY;
+
+  useEffect(() => {
+    if (activeTab !== 'dashboard' || currentUserRole !== 'admin' || !authenticatedSession || !currentSurvey.id) {
+      setDashboardAssignmentSummary(null);
+      setDashboardAssignmentsError(null);
+      return;
+    }
+    let isCurrent = true;
+    setDashboardAssignmentsLoading(true);
+    setDashboardAssignmentsError(null);
+    void listSurveyAssignments(currentSurvey.id)
+      .then((summary) => {
+        if (isCurrent) setDashboardAssignmentSummary(summary);
+      })
+      .catch((error: unknown) => {
+        if (isCurrent) setDashboardAssignmentsError(error instanceof Error ? error.message : 'No se pudieron cargar los estados de las comunidades.');
+      })
+      .finally(() => {
+        if (isCurrent) setDashboardAssignmentsLoading(false);
+      });
+    return () => {
+      isCurrent = false;
+    };
+  }, [activeTab, currentUserRole, authenticatedSession, currentSurvey.id]);
+
+  useEffect(() => {
+    setDashboardAssignmentPage(1);
+  }, [currentSurvey.id]);
 
   useEffect(() => {
     if (activeSurveys.length === 0) {
@@ -903,6 +935,16 @@ export function App() {
     const percentage = totalQuota > 0 ? Math.min(100, Math.round((completed / totalQuota) * 100)) : 0;
     return { totalQuota, completed, remaining, percentage };
   }, [currentSurvey.communities, currentSurveyInterviews]);
+  const dashboardTotalAssignedQuota = currentUserRole === 'admin'
+    ? dashboardAssignmentSummary?.totalAssignedQuota ?? 0
+    : communitySurveyProgress.totalQuota;
+  const dashboardRemainingQuota = Math.max(0, dashboardTotalAssignedQuota - communitySurveyProgress.completed);
+  const dashboardProgressPercentage = dashboardTotalAssignedQuota > 0
+    ? Math.min(100, Math.round((communitySurveyProgress.completed / dashboardTotalAssignedQuota) * 100))
+    : 0;
+  const dashboardAssignmentRows = dashboardAssignmentSummary?.assignments ?? [];
+  const dashboardAssignmentPageCount = Math.max(1, Math.ceil(dashboardAssignmentRows.length / 10));
+  const paginatedDashboardAssignments = dashboardAssignmentRows.slice((dashboardAssignmentPage - 1) * 10, dashboardAssignmentPage * 10);
   const latestInterviewNotifications = useMemo(
     () => mergeInterviewRecords([], currentSurveyInterviews)
       .slice(0, 5),
@@ -1691,6 +1733,40 @@ export function App() {
       });
     } catch (error) {
       await Swal.fire({ icon: 'error', title: 'No se pudo actualizar la meta', text: error instanceof Error ? error.message : 'Error al guardar la cantidad.' });
+    } finally {
+      setSavingAssignmentId(null);
+    }
+  };
+
+  const handleRemoveCommunityAssignment = async (community: CommunityAssignment) => {
+    const survey = surveys.find((item) => item.id === assignmentSurveyId);
+    if (!survey || currentUserRole !== 'admin' || savingAssignmentId) return;
+    const confirmation = await Swal.fire({
+      icon: 'warning',
+      title: '¿Quitar esta comunidad del estudio?',
+      text: `${community.name} dejará de mostrarse como asignada en este estudio. La asignación se cancelará y se conservarán todas las encuestas, la comunidad y su historial.`,
+      showCancelButton: true,
+      confirmButtonText: 'Quitar del estudio',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#b42318',
+    });
+    if (!confirmation.isConfirmed) return;
+
+    setSavingAssignmentId(community.id);
+    try {
+      await removeCommunityAssignment(survey.id, community.id);
+      setSurveys((previous) => previous.map((item) => {
+        if (item.id !== survey.id) return item;
+        const communities = item.communities.filter((entry) => entry.id !== community.id);
+        return {
+          ...item,
+          communities,
+          assignedEnumerators: Array.from(new Set(communities.map((entry) => entry.assignedTo))),
+        };
+      }));
+      await Swal.fire({ icon: 'success', title: 'Asignación cancelada', text: 'La comunidad y todas las encuestas registradas se conservaron.', timer: 2000, showConfirmButton: false });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo quitar', text: error instanceof Error ? error.message : 'Error al quitar la comunidad del estudio.' });
     } finally {
       setSavingAssignmentId(null);
     }
@@ -3541,7 +3617,14 @@ export function App() {
                 <div className="kpi-value">{currentSurveyInterviews.length}</div>
                 <div className="kpi-footer">
                   <CheckCircle2 size={13} style={{ color: '#10b981' }} />
-                  <span>Meta asignada a comunidades: {communitySurveyProgress.totalQuota.toLocaleString()} encuestas en {currentSurvey.municipality}</span>
+                  <span>
+                    Meta asignada a comunidades: {currentUserRole === 'admin' && dashboardAssignmentsLoading
+                      ? 'Calculando...'
+                      : dashboardTotalAssignedQuota.toLocaleString()} encuestas en {currentSurvey.municipality}
+                    {currentUserRole === 'admin' && dashboardAssignmentSummary && dashboardAssignmentRows.some((assignment) => assignment.status === 'cancelled')
+                      ? ' (metas canceladas excluidas)'
+                      : ''}
+                  </span>
                 </div>
               </div>
 
@@ -3578,22 +3661,90 @@ export function App() {
                     <BarChart3 size={18} />
                   </div>
                 </div>
-                <div className="kpi-value">{communitySurveyProgress.percentage}%</div>
+                <div className="kpi-value">{currentUserRole === 'admin' && dashboardAssignmentsLoading ? '—' : `${dashboardProgressPercentage}%`}</div>
                 <div
                   role="progressbar"
                   aria-label="Avance de encuestas asignadas en comunidades"
                   aria-valuemin={0}
                   aria-valuemax={100}
-                  aria-valuenow={communitySurveyProgress.percentage}
+                  aria-valuenow={dashboardProgressPercentage}
                   style={{ height: 7, margin: '0.55rem 0', borderRadius: 999, background: 'var(--border-color, #e2e8f0)', overflow: 'hidden' }}
                 >
-                  <div style={{ width: `${communitySurveyProgress.percentage}%`, height: '100%', borderRadius: 999, background: '#05a6f0', transition: 'width 250ms ease' }} />
+                  <div style={{ width: `${dashboardProgressPercentage}%`, height: '100%', borderRadius: 999, background: '#05a6f0', transition: 'width 250ms ease' }} />
                 </div>
                 <div className="kpi-footer">
-                  <span>{communitySurveyProgress.completed} realizadas · {communitySurveyProgress.remaining} pendientes de {communitySurveyProgress.totalQuota}</span>
+                  <span>{communitySurveyProgress.completed} realizadas · {dashboardRemainingQuota} pendientes de {dashboardTotalAssignedQuota}</span>
                 </div>
               </div>
             </div>
+
+            {currentUserRole === 'admin' && (
+              <section className="glass-panel" aria-labelledby="dashboard-assignments-heading" style={{ margin: '1rem 0 1.25rem', padding: '1rem', minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.85rem' }}>
+                  <div>
+                    <h3 id="dashboard-assignments-heading" style={{ margin: 0 }}>Comunidades y estado de asignación</h3>
+                    <p style={{ margin: '0.3rem 0 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                      Estudio: {currentSurvey.title}. Las metas canceladas se conservan como historial y no se suman al total asignado.
+                    </p>
+                  </div>
+                  <div style={{ fontWeight: 700, color: '#087aaf' }}>
+                    Total vigente: {dashboardAssignmentsLoading ? 'Calculando...' : `${dashboardTotalAssignedQuota.toLocaleString()} encuestas`}
+                  </div>
+                </div>
+                {dashboardAssignmentsError ? (
+                  <div role="alert" style={{ color: '#b42318', padding: '0.75rem' }}>No se pudieron cargar las comunidades: {dashboardAssignmentsError}</div>
+                ) : dashboardAssignmentsLoading && !dashboardAssignmentSummary ? (
+                  <div role="status" style={{ color: 'var(--text-muted)', padding: '0.75rem' }}>Cargando comunidades y asignaciones...</div>
+                ) : dashboardAssignmentRows.length === 0 ? (
+                  <div style={{ color: 'var(--text-muted)', padding: '0.75rem' }}>Este estudio todavía no tiene comunidades asignadas ni canceladas.</div>
+                ) : (
+                  <>
+                    <div style={{ overflowX: 'auto', width: '100%' }}>
+                      <table style={{ width: '100%', minWidth: 680, borderCollapse: 'collapse', fontSize: '0.86rem' }}>
+                        <thead>
+                          <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--border-color, #dbe3ea)' }}>
+                            <th style={{ padding: '0.7rem' }}>Comunidad</th>
+                            <th style={{ padding: '0.7rem' }}>Encuestador</th>
+                            <th style={{ padding: '0.7rem' }}>Meta</th>
+                            <th style={{ padding: '0.7rem' }}>Realizadas</th>
+                            <th style={{ padding: '0.7rem' }}>Estado</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {paginatedDashboardAssignments.map((assignment) => {
+                            const cancelled = assignment.status === 'cancelled';
+                            const statusLabel = assignment.status === 'active' ? 'Asignada' : assignment.status === 'pending' ? 'Pendiente' : assignment.status === 'completed' ? 'Completada' : 'Cancelada';
+                            return (
+                              <tr key={assignment.assignmentId} style={{ borderBottom: '1px solid var(--border-color, #e5eaf0)', opacity: cancelled ? 0.72 : 1 }}>
+                                <td style={{ padding: '0.7rem', fontWeight: 600 }}>{assignment.community}</td>
+                                <td style={{ padding: '0.7rem' }}>{assignment.assignedTo}</td>
+                                <td style={{ padding: '0.7rem' }}>{assignment.quota.toLocaleString()}{cancelled ? ' (histórica)' : ''}</td>
+                                <td style={{ padding: '0.7rem' }}>{assignment.completedInterviews.toLocaleString()}</td>
+                                <td style={{ padding: '0.7rem' }}>
+                                  <span style={{ display: 'inline-block', borderRadius: 999, padding: '0.22rem 0.6rem', fontWeight: 700, color: cancelled ? '#b42318' : assignment.status === 'completed' ? '#047857' : '#087aaf', background: cancelled ? '#fee4e2' : assignment.status === 'completed' ? '#d1fae5' : '#e0f2fe' }}>
+                                    {statusLabel}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.85rem', fontSize: '0.85rem' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {dashboardAssignmentRows.length} asignaciones · mostrando {(dashboardAssignmentPage - 1) * 10 + 1}–{Math.min(dashboardAssignmentPage * 10, dashboardAssignmentRows.length)}
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <button type="button" className="btn btn-secondary" disabled={dashboardAssignmentPage <= 1} onClick={() => setDashboardAssignmentPage((page) => Math.max(1, page - 1))}>Anterior</button>
+                        <span>Página {dashboardAssignmentPage} de {dashboardAssignmentPageCount}</span>
+                        <button type="button" className="btn btn-secondary" disabled={dashboardAssignmentPage >= dashboardAssignmentPageCount} onClick={() => setDashboardAssignmentPage((page) => Math.min(dashboardAssignmentPageCount, page + 1))}>Siguiente</button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </section>
+            )}
 
             <div className="dashboard-live-grid">
             <section className="glass-panel recent-surveys-panel" aria-labelledby="recent-surveys-heading">
@@ -4321,7 +4472,7 @@ export function App() {
                         <th>Meta Cuota</th>
                         <th>Encuestador Asignado (Exclusivo)</th>
                         <th>Asignar a encuestador</th>
-                        {currentUserRole === 'admin' && <th>Editar</th>}
+                        {currentUserRole === 'admin' && <th>Acciones</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -4366,7 +4517,26 @@ export function App() {
                               </span>
                             )}
                           </td>
-                          {currentUserRole === 'admin' && <td data-label="Editar"><button type="button" className="btn btn-secondary" onClick={() => void handleEditAssignedCommunity(c)} disabled={savingAssignmentId === c.id || assignmentSurvey.status === 'completed'}><Pencil size={14} /> Editar</button></td>}
+                          {currentUserRole === 'admin' && (
+                            <td data-label="Acciones">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '.4rem', flexWrap: 'wrap' }}>
+                                <button type="button" className="btn btn-secondary" onClick={() => void handleEditAssignedCommunity(c)} disabled={savingAssignmentId !== null || assignmentSurvey.status === 'completed'}>
+                                  <Pencil size={14} /> Editar
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  onClick={() => void handleRemoveCommunityAssignment(c)}
+                                  disabled={savingAssignmentId !== null}
+                                  title="Quitar esta comunidad de este estudio"
+                                  aria-label={`Quitar ${c.name} de este estudio`}
+                                  style={{ color: '#b42318', borderColor: 'rgba(180, 35, 24, .3)' }}
+                                >
+                                  <Trash2 size={14} /> Quitar
+                                </button>
+                              </div>
+                            </td>
+                          )}
                         </tr>
                       ))}
                       {assignmentSurvey.communities.length === 0 && <tr><td colSpan={currentUserRole === 'admin' ? 5 : 4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>Este estudio todavía no tiene comunidades asignadas.</td></tr>}
