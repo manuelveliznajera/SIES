@@ -159,10 +159,38 @@ export class InterviewsService {
       }
       // Revisa duplicados después de bloquear la asignación para que los reintentos
       // de sincronización sigan siendo idempotentes incluso al alcanzar la cuota.
-      const duplicate = await client.query<{ id: string }>(
-        `SELECT id FROM interviews WHERE device_uuid = $1`, [input.deviceUuid]
+      const duplicate = await client.query<{ id: string; folio: string }>(
+        `SELECT id, COALESCE(device_info->>'folio', device_uuid::text) AS folio FROM interviews WHERE device_uuid = $1`, [input.deviceUuid]
       );
-      if (duplicate.rowCount) return { id: duplicate.rows[0].id, duplicate: true };
+      if (duplicate.rowCount) return { id: duplicate.rows[0].id, folio: duplicate.rows[0].folio, duplicate: true };
+
+      // Serializa los envíos de distintos dispositivos que comparten una cuenta.
+      // El bloqueo por encuestador hace que el siguiente folio se calcule una sola vez.
+      const enumeratorResult = await client.query<{ username: string }>(
+        `SELECT u.username
+         FROM enumerators e
+         JOIN users u ON u.id = e.user_id
+         WHERE e.id = $1
+         FOR UPDATE OF e`,
+        [assignment.enumerator_id]
+      );
+      const enumeratorAlias = enumeratorResult.rows[0]?.username;
+      if (!enumeratorAlias) {
+        throw new InterviewSubmissionError('No se encontró el usuario del encuestador asignado.', 409, 'ENUMERATOR_NOT_FOUND');
+      }
+      const folioResult = await client.query<{ last_number: number }>(
+        `SELECT COALESCE(MAX(
+           CASE
+             WHEN substring(device_info->>'folio' FROM char_length($2) + 2) ~ '^[0-9]+$'
+             THEN substring(device_info->>'folio' FROM char_length($2) + 2)::integer
+           END
+         ), 0)::integer AS last_number
+         FROM interviews
+         WHERE enumerator_id = $1
+           AND left(device_info->>'folio', char_length($2) + 1) = $2 || '-'`,
+        [assignment.enumerator_id, enumeratorAlias]
+      );
+      const folio = `${enumeratorAlias}-${String(Number(folioResult.rows[0]?.last_number ?? 0) + 1).padStart(2, '0')}`;
 
       const completedCount = await client.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM interviews WHERE survey_id = $1 AND community_id = $2`,
@@ -231,14 +259,17 @@ export class InterviewsService {
           input.latitude,
           input.longitude,
           input.accuracy,
-          JSON.stringify({ folio: input.folio, ageGroup: input.ageGroup, gender: input.gender }),
+          JSON.stringify({ folio, ageGroup: input.ageGroup, gender: input.gender }),
           assignment.version_number,
         ]
       );
 
       if (!inserted.rowCount) {
-        const existing = await client.query<{ id: string }>(`SELECT id FROM interviews WHERE device_uuid = $1`, [input.deviceUuid]);
-        return { id: existing.rows[0].id, duplicate: true };
+        const existing = await client.query<{ id: string; folio: string }>(
+          `SELECT id, COALESCE(device_info->>'folio', device_uuid::text) AS folio FROM interviews WHERE device_uuid = $1`,
+          [input.deviceUuid]
+        );
+        return { id: existing.rows[0].id, folio: existing.rows[0].folio, duplicate: true };
       }
 
       const interviewId = inserted.rows[0].id;
@@ -296,7 +327,7 @@ export class InterviewsService {
         );
       }
 
-      return { id: interviewId, duplicate: false };
+      return { id: interviewId, folio, duplicate: false };
     });
   }
 

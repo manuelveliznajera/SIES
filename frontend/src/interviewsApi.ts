@@ -32,7 +32,7 @@ const interviewSchema = z.object({
 });
 
 const listResponseSchema = z.object({ success: z.literal(true), interviews: z.array(interviewSchema) });
-const createResponseSchema = z.object({ success: z.literal(true), interview: z.object({ id: z.string(), duplicate: z.boolean() }) });
+const createResponseSchema = z.object({ success: z.literal(true), interview: z.object({ id: z.string(), folio: z.string().optional(), duplicate: z.boolean() }) });
 const correctCommunityResponseSchema = z.object({
   success: z.literal(true),
   correction: z.object({ id: z.string(), communityId: z.string(), community: z.string() }),
@@ -93,14 +93,14 @@ export async function listInterviews(): Promise<InterviewRecord[]> {
   return payload.interviews;
 }
 
-export async function createInterview(input: InterviewWriteInput): Promise<string> {
+export async function createInterview(input: InterviewWriteInput): Promise<{ databaseId: string; folio: string }> {
   const response = await authenticatedFetch(`${apiBase}/interviews`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
   const result = await parseResponse(response, createResponseSchema);
-  return result.interview.id;
+  return { databaseId: result.interview.id, folio: result.interview.folio ?? input.folio };
 }
 
 export async function deleteInterview(interviewId: string): Promise<void> {

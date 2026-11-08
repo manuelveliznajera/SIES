@@ -367,6 +367,10 @@ function mergeInterviewRecords(pending: InterviewRecord[], loaded: InterviewReco
   });
 }
 
+function getSurveyNumberFromFolio(folio: string): number {
+  return Number(folio.match(/-(\d+)$/)?.[1] ?? 0);
+}
+
 function getInterviewAnswer(record: InterviewRecord, question?: SurveyQuestion): string {
   if (!question) return '—';
   return record.answers.find((answer) => answer.questionId === question.id)?.answerText
@@ -550,8 +554,9 @@ export function App() {
 
   const [dashboardChartType, setDashboardChartType] = useState<'bar' | 'pie'>('bar');
   const [newInterviewNotificationId, setNewInterviewNotificationId] = useState<string | null>(null);
+  const [freeTextResponsePages, setFreeTextResponsePages] = useState<Record<string, number>>({});
   const [interviewTableFilters, setInterviewTableFilters] = useState({
-    folio: '', enumerator: '', community: '', profile: '', date: '', mayorVote: '', presidentVote: '',
+    folio: '', enumerator: '', community: '', mayorVote: '',
   });
   const [interviewTablePage, setInterviewTablePage] = useState(1);
 
@@ -770,10 +775,12 @@ export function App() {
       for (const item of pending) {
         if (cancelled || item.enumeratorUsername.toLowerCase() !== authenticatedSession.username.toLowerCase()) continue;
         try {
-          const databaseId = await createInterviewRequest(item.input);
+          const saved = await createInterviewRequest(item.input);
           await removePendingInterview(item.deviceUuid);
           setInterviews((previous) => previous.map((record) =>
-            record.id === item.record.id ? { ...record, databaseId, status: 'synced' } : record
+            record.deviceUuid === item.deviceUuid
+              ? { ...record, id: saved.folio, surveyNumber: getSurveyNumberFromFolio(saved.folio), databaseId: saved.databaseId, status: 'synced' }
+              : record
           ));
         } catch {
           // Mantener el registro local para reintentar cuando vuelva la conexión.
@@ -803,32 +810,22 @@ export function App() {
     const title = question.title.toLocaleLowerCase();
     return title.includes('alcalde') && /(vot|candidat|eleccion|preparad)/.test(title);
   });
-  const tablePresidentVoteQuestion = currentSurvey.questions.find((question) => question.title.toLocaleLowerCase().includes('presidente'));
   const interviewTableRows = useMemo(() => {
     const normalize = (value: string) => value.trim().toLocaleLowerCase();
-    const guatemalaDate = (value: string) => {
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return '';
-      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Guatemala', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
-      const part = (type: string) => parts.find((item) => item.type === type)?.value ?? '';
-      return `${part('year')}-${part('month')}-${part('day')}`;
-    };
     return currentSurveyInterviews.filter((record) => {
       const mayorVote = getInterviewAnswer(record, tableMayorVoteQuestion);
-      const presidentVote = getInterviewAnswer(record, tablePresidentVoteQuestion);
       return normalize(record.id).includes(normalize(interviewTableFilters.folio))
         && (!interviewTableFilters.enumerator || normalize(record.enumeratorAlias) === normalize(interviewTableFilters.enumerator))
         && (!interviewTableFilters.community || normalize(record.community) === normalize(interviewTableFilters.community))
-        && normalize(`${record.ageGroup} ${record.gender}`).includes(normalize(interviewTableFilters.profile))
-        && (!interviewTableFilters.date || guatemalaDate(record.timestamp) === interviewTableFilters.date)
-        && (!interviewTableFilters.mayorVote || mayorVote === interviewTableFilters.mayorVote)
-        && (!interviewTableFilters.presidentVote || presidentVote === interviewTableFilters.presidentVote);
+        && (!interviewTableFilters.mayorVote || mayorVote === interviewTableFilters.mayorVote);
     });
-  }, [currentSurveyInterviews, interviewTableFilters, tableMayorVoteQuestion, tablePresidentVoteQuestion]);
+  }, [currentSurveyInterviews, interviewTableFilters, tableMayorVoteQuestion]);
   const interviewTablePageCount = Math.max(1, Math.ceil(interviewTableRows.length / 10));
   const paginatedInterviewRows = interviewTableRows.slice((interviewTablePage - 1) * 10, interviewTablePage * 10);
-  const mayorVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews.map((record) => getInterviewAnswer(record, tableMayorVoteQuestion)).filter((answer) => answer !== '—'))].sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tableMayorVoteQuestion]);
-  const presidentVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews.map((record) => getInterviewAnswer(record, tablePresidentVoteQuestion)).filter((answer) => answer !== '—'))].sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tablePresidentVoteQuestion]);
+  const mayorVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews
+    .map((record) => getInterviewAnswer(record, tableMayorVoteQuestion))
+    .filter((answer) => answer !== '—' && !answer.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase().startsWith('ningun')))]
+    .sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tableMayorVoteQuestion]);
   const interviewEnumeratorFilterOptions = useMemo(() => {
     const byAlias = new Map<string, string>();
     currentSurveyInterviews.forEach((record) => byAlias.set(record.enumeratorAlias, record.enumeratorName || record.enumeratorAlias));
@@ -1123,6 +1120,7 @@ export function App() {
     setIsInterviewSaving(true);
     let savedOffline = false;
     let databaseId: string | undefined;
+    let savedFolio = folioId;
     try {
       if (!isOnline || !navigator.onLine) {
         await savePendingInterview({
@@ -1135,7 +1133,9 @@ export function App() {
         savedOffline = true;
       } else {
         try {
-          databaseId = await createInterviewRequest(writeInput);
+          const saved = await createInterviewRequest(writeInput);
+          databaseId = saved.databaseId;
+          savedFolio = saved.folio;
         } catch (error) {
           if (!(error instanceof TypeError) && navigator.onLine) throw error;
           await savePendingInterview({
@@ -1183,21 +1183,27 @@ export function App() {
       })
     );
 
-    setInterviews((previous) => [{ ...newRecord, databaseId, status: savedOffline ? 'pending' : 'synced' }, ...previous]);
+    setInterviews((previous) => [{
+      ...newRecord,
+      id: savedFolio,
+      surveyNumber: getSurveyNumberFromFolio(savedFolio),
+      databaseId,
+      status: savedOffline ? 'pending' : 'synced',
+    }, ...previous]);
     setFieldAnswers(Object.fromEntries(currentSurvey.questions.map((question) => [question.id, ''])));
     setInterviewStartedAt(null);
     setGpsLocation(null);
     setGpsUpdated(false);
     setGpsError(null);
     setFormSuccessMessage(savedOffline
-      ? `Encuesta ${folioId} guardada en este dispositivo. Se enviará al recuperar la conexión.`
-      : `¡Encuesta registrada con éxito bajo el Folio ${folioId} en ${fieldCommunity}!`);
+      ? `Encuesta guardada sin conexión. Folio provisional: ${savedFolio}; recibirá un folio definitivo al sincronizarse.`
+      : `¡Encuesta registrada con éxito bajo el Folio ${savedFolio} en ${fieldCommunity}!`);
     await Swal.fire({
       icon: 'success',
       title: savedOffline ? 'Encuesta guardada en el dispositivo' : 'Encuesta guardada',
       text: savedOffline
-        ? `La encuesta ${folioId} quedó pendiente en este dispositivo y se sincronizará cuando vuelva la conexión.`
-        : `La encuesta ${folioId} se registró correctamente en ${fieldCommunity}.`,
+        ? `Folio provisional: ${savedFolio}. Al recuperar conexión, el servidor le asignará el folio definitivo y sincronizará la encuesta.`
+        : `La encuesta ${savedFolio} se registró correctamente en ${fieldCommunity}.`,
       confirmButtonText: 'Continuar',
       confirmButtonColor: '#05a6f0'
     });
@@ -3641,6 +3647,9 @@ export function App() {
                     .filter((item) => Boolean(item.answer && item.answer !== 'Sin respuesta'));
                   const responses = responseRecords.map((item) => item.answer as string);
                   const isFreeTextQuestion = question.type === 'text' || /observaciones/i.test(question.title);
+                  const responsePageCount = Math.max(1, Math.ceil(responseRecords.length / 10));
+                  const responsePage = Math.min(freeTextResponsePages[question.id] ?? 1, responsePageCount);
+                  const paginatedResponseRecords = responseRecords.slice((responsePage - 1) * 10, responsePage * 10);
                   const data = question.options.length
                     ? question.options.map((option) => ({
                         nombre: option.text,
@@ -3665,9 +3674,9 @@ export function App() {
                       <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginBottom: '0.25rem' }}>{total} respuestas</div>
                       {isFreeTextQuestion ? (
                         responseRecords.length > 0 ? (
-                          <div style={{ maxHeight: 340, overflowY: 'auto', display: 'grid', gap: '.55rem', paddingRight: '.2rem' }}>
-                            {responseRecords.map(({ record, answer }) => (
-                              <article key={`${record.surveyId}-${record.id}-${question.id}`} style={{ padding: '.65rem .75rem', background: '#f4f9fc', border: '1px solid #d9edf7', borderRadius: 'var(--radius-sm)' }}>
+                          <div style={{ display: 'grid', gap: '.55rem', paddingRight: '.2rem' }}>
+                            {paginatedResponseRecords.map(({ record, answer }) => (
+                              <article key={`${record.databaseId ?? record.deviceUuid ?? `${record.surveyId}-${record.id}`}-${question.id}`} style={{ padding: '.65rem .75rem', background: '#f4f9fc', border: '1px solid #d9edf7', borderRadius: 'var(--radius-sm)' }}>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: '.25rem .75rem', marginBottom: '.3rem', fontSize: '.72rem', color: 'var(--text-muted)' }}>
                                   <strong style={{ color: '#087fb8' }}>{record.id} · {record.enumeratorName || record.enumeratorAlias}</strong>
                                   <span>{record.community} · {formatGuatemalaDateTime(record.timestamp)}</span>
@@ -3675,6 +3684,18 @@ export function App() {
                                 <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '.82rem', color: 'var(--text-main, #1f2933)' }}>{answer}</div>
                               </article>
                             ))}
+                            {responseRecords.length > 10 && (
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '.5rem', flexWrap: 'wrap', paddingTop: '.3rem' }}>
+                                <span style={{ color: 'var(--text-muted)', fontSize: '.72rem' }}>
+                                  Mostrando {(responsePage - 1) * 10 + 1}–{Math.min(responsePage * 10, responseRecords.length)} de {responseRecords.length}
+                                </span>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '.45rem' }}>
+                                  <button type="button" className="btn btn-secondary" onClick={() => setFreeTextResponsePages((pages) => ({ ...pages, [question.id]: Math.max(1, responsePage - 1) }))} disabled={responsePage <= 1}>Anterior</button>
+                                  <span style={{ fontSize: '.72rem', color: 'var(--text-muted)' }}>Página {responsePage} de {responsePageCount}</span>
+                                  <button type="button" className="btn btn-secondary" onClick={() => setFreeTextResponsePages((pages) => ({ ...pages, [question.id]: Math.min(responsePageCount, responsePage + 1) }))} disabled={responsePage >= responsePageCount}>Siguiente</button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <div style={{ minHeight: 110, display: 'grid', placeItems: 'center', textAlign: 'center', color: 'var(--text-muted)', fontSize: '.8rem' }}>
@@ -3747,19 +3768,16 @@ export function App() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>No. Encuesta</th>
-                      <th>Encuestador</th>
-                      <th>Comunidad Asignada</th>
-                      <th>Edad / Género</th>
-                      <th>Fecha / Hora</th>
+                      <th>Folio</th>
+                      <th>Usuario</th>
+                      <th>Comunidad</th>
                       <th title={tableMayorVoteQuestion?.title ?? 'Pregunta 6 del estudio'}>Voto Alcalde · P6</th>
-                      <th>Voto Presidente</th>
-                      <th>Acciones</th>
+                      <th>Opciones</th>
                     </tr>
                     <tr>
                       <th><input className="form-input" aria-label="Filtrar por número de encuesta" placeholder="Buscar folio" value={interviewTableFilters.folio} onChange={(event) => updateInterviewTableFilter('folio', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
                       <th>
-                        <select className="form-select" aria-label="Filtrar por encuestador" value={interviewTableFilters.enumerator} onChange={(event) => updateInterviewTableFilter('enumerator', event.target.value)} style={{ minWidth: 145, padding: '.4rem', fontSize: '.72rem' }}>
+                        <select className="form-select" aria-label="Filtrar por usuario" value={interviewTableFilters.enumerator} onChange={(event) => updateInterviewTableFilter('enumerator', event.target.value)} style={{ minWidth: 145, padding: '.4rem', fontSize: '.72rem' }}>
                           <option value="">Todos</option>{interviewEnumeratorFilterOptions.map(([alias, fullName]) => <option key={alias} value={alias}>{fullName} (@{alias})</option>)}
                         </select>
                       </th>
@@ -3768,40 +3786,30 @@ export function App() {
                           <option value="">Todas</option>{interviewCommunityFilterOptions.map((community) => <option key={community} value={community}>{community}</option>)}
                         </select>
                       </th>
-                      <th><input className="form-input" aria-label="Filtrar por edad o género" placeholder="Edad o género" value={interviewTableFilters.profile} onChange={(event) => updateInterviewTableFilter('profile', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
-                      <th><input className="form-input" aria-label="Filtrar por fecha" type="date" value={interviewTableFilters.date} onChange={(event) => updateInterviewTableFilter('date', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }} /></th>
                       <th>
                         <select className="form-select" aria-label="Filtrar por respuesta a la pregunta 6" value={interviewTableFilters.mayorVote} onChange={(event) => updateInterviewTableFilter('mayorVote', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }}>
                           <option value="">Todas</option>{mayorVoteFilterOptions.map((answer) => <option key={answer} value={answer}>{answer}</option>)}
                         </select>
                       </th>
-                      <th>
-                        <select className="form-select" aria-label="Filtrar por voto de Presidente" value={interviewTableFilters.presidentVote} onChange={(event) => updateInterviewTableFilter('presidentVote', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }}>
-                          <option value="">Todas</option>{presidentVoteFilterOptions.map((answer) => <option key={answer} value={answer}>{answer}</option>)}
-                        </select>
-                      </th>
-                      <th><button type="button" className="btn btn-secondary" onClick={() => { setInterviewTableFilters({ folio: '', enumerator: '', community: '', profile: '', date: '', mayorVote: '', presidentVote: '' }); setInterviewTablePage(1); }} style={{ padding: '.4rem .55rem', fontSize: '.7rem', whiteSpace: 'nowrap' }}>Limpiar</button></th>
+                      <th><button type="button" className="btn btn-secondary" onClick={() => { setInterviewTableFilters({ folio: '', enumerator: '', community: '', mayorVote: '' }); setInterviewTablePage(1); }} style={{ padding: '.4rem .55rem', fontSize: '.7rem', whiteSpace: 'nowrap' }}>Limpiar filtros</button></th>
                     </tr>
                   </thead>
                   <tbody>
                     {paginatedInterviewRows.map((item) => {
                       const alcAns = getInterviewAnswer(item, tableMayorVoteQuestion);
-                      const presAns = getInterviewAnswer(item, tablePresidentVoteQuestion);
 
                       return (
-                        <tr key={item.id}>
+                        <tr key={item.databaseId ?? item.deviceUuid ?? `${item.surveyId}:${item.id}`}>
                           <td>
                             <span className="survey-id-badge">{item.id}</span>
                           </td>
-                          <td style={{ fontWeight: 600 }}>{item.enumeratorAlias}</td>
+                          <td style={{ fontWeight: 600 }}>
+                            <div>{item.enumeratorName || item.enumeratorAlias}</div>
+                            {item.enumeratorName && <small style={{ color: 'var(--text-muted)' }}>@{item.enumeratorAlias}</small>}
+                          </td>
                           <td>{item.community}</td>
-                          <td>{item.ageGroup} • {item.gender}</td>
-                          <td style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{formatGuatemalaDateTime(item.timestamp)}</td>
                           <td style={{ fontWeight: 700, color: '#ec4899', fontSize: '0.78rem' }}>
                             {alcAns.length > 25 ? alcAns.substring(0, 22) + '...' : alcAns}
-                          </td>
-                          <td style={{ fontWeight: 600, color: '#38bdf8', fontSize: '0.78rem' }}>
-                            {presAns.length > 25 ? presAns.substring(0, 22) + '...' : presAns}
                           </td>
                           <td>
                             <div style={{ display: 'flex', gap: '0.4rem' }}>
@@ -3856,13 +3864,23 @@ export function App() {
                     })}
                     {!isInterviewsLoading && interviewTableRows.length === 0 && (
                       <tr>
-                        <td colSpan={8} style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                        <td colSpan={5} style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
                           {interviewsApiError ? 'No fue posible consultar las entrevistas en la base de datos.' : currentSurveyInterviews.length ? 'No hay encuestas que coincidan con los filtros.' : 'No hay entrevistas guardadas para esta encuesta.'}
                         </td>
                       </tr>
                     )}
                   </tbody>
                 </table>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '.75rem', flexWrap: 'wrap', paddingTop: '.9rem' }}>
+                <span style={{ color: 'var(--text-muted)', fontSize: '.78rem' }}>
+                  {interviewTableRows.length === 0 ? 'Mostrando 0 registros' : `Mostrando ${(interviewTablePage - 1) * 10 + 1}–${Math.min(interviewTablePage * 10, interviewTableRows.length)} de ${interviewTableRows.length}`}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem' }}>
+                  <button type="button" className="btn btn-secondary" onClick={() => setInterviewTablePage((page) => Math.max(1, page - 1))} disabled={interviewTablePage <= 1}>Anterior</button>
+                  <span aria-live="polite" style={{ fontSize: '.78rem', color: 'var(--text-muted)' }}>Página {interviewTablePage} de {interviewTablePageCount}</span>
+                  <button type="button" className="btn btn-secondary" onClick={() => setInterviewTablePage((page) => Math.min(interviewTablePageCount, page + 1))} disabled={interviewTablePage >= interviewTablePageCount}>Siguiente</button>
+                </div>
               </div>
             </div>
           </div>
@@ -4116,7 +4134,7 @@ export function App() {
                   />
                   <FitMapToInterviews records={mapInterviews} />
                   {mapInterviews.map((record) => (
-                    <Marker key={record.id} position={[record.lat, record.lng]} icon={interviewMarkerIcon}>
+                    <Marker key={record.databaseId ?? record.deviceUuid ?? `${record.surveyId}:${record.id}`} position={[record.lat, record.lng]} icon={interviewMarkerIcon}>
                       <Popup>
                         <div className="gps-popup">
                           <strong>{record.id} · {record.community}</strong>
@@ -4457,16 +4475,6 @@ export function App() {
                     </tbody>
                   </table>
                 </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '.75rem', flexWrap: 'wrap', paddingTop: '.9rem' }}>
-                <span style={{ color: 'var(--text-muted)', fontSize: '.78rem' }}>
-                  {interviewTableRows.length === 0 ? 'Mostrando 0 registros' : `Mostrando ${(interviewTablePage - 1) * 10 + 1}–${Math.min(interviewTablePage * 10, interviewTableRows.length)} de ${interviewTableRows.length}`}
-                </span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem' }}>
-                  <button type="button" className="btn btn-secondary" onClick={() => setInterviewTablePage((page) => Math.max(1, page - 1))} disabled={interviewTablePage <= 1}>Anterior</button>
-                  <span aria-live="polite" style={{ fontSize: '.78rem', color: 'var(--text-muted)' }}>Página {interviewTablePage} de {interviewTablePageCount}</span>
-                  <button type="button" className="btn btn-secondary" onClick={() => setInterviewTablePage((page) => Math.min(interviewTablePageCount, page + 1))} disabled={interviewTablePage >= interviewTablePageCount}>Siguiente</button>
-                </div>
-              </div>
               </div>
             </div>
           </section>

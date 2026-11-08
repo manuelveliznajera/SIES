@@ -24,7 +24,7 @@ export async function createInterview(req: Request, res: Response, next: NextFun
         entityType: 'interview',
         entityId: interview.id,
         changes: {
-          folio: input.folio,
+          folio: interview.folio,
           surveyId: input.surveyId,
           communityId: input.communityId,
           startedAt: input.startedAt ?? input.interviewedAt,
@@ -34,7 +34,7 @@ export async function createInterview(req: Request, res: Response, next: NextFun
       });
       publishInterviewCreated({
         id: interview.id,
-        folio: input.folio,
+        folio: interview.folio,
         surveyId: input.surveyId,
         createdAt: input.interviewedAt,
       });
