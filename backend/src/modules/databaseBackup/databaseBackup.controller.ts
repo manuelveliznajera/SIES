@@ -24,8 +24,12 @@ interface BackupSequence {
   table_name: string;
 }
 
-const PRESERVED_PUBLIC_TABLES = new Set(['users', 'roles', 'user_roles', 'refresh_tokens', 'enumerators', 'pgmigrations', 'schema_migrations']);
-const isPreservedTable = (table: Pick<BackupTable, 'schema' | 'name'>) => table.schema === 'public' && PRESERVED_PUBLIC_TABLES.has(table.name);
+const AUTH_PUBLIC_TABLES = new Set(['users', 'roles', 'user_roles', 'refresh_tokens', 'enumerators']);
+const MIGRATION_PUBLIC_TABLES = new Set(['pgmigrations', 'schema_migrations']);
+const PRESERVED_PUBLIC_TABLES = new Set([...AUTH_PUBLIC_TABLES, ...MIGRATION_PUBLIC_TABLES]);
+const isMigrationTable = (table: Pick<BackupTable, 'schema' | 'name'>) => table.schema === 'public' && MIGRATION_PUBLIC_TABLES.has(table.name);
+const shouldExcludeFromBackup = (table: Pick<BackupTable, 'schema' | 'name'>, includeUsers: boolean) =>
+  isMigrationTable(table) || (!includeUsers && table.schema === 'public' && AUTH_PUBLIC_TABLES.has(table.name));
 
 async function listApplicationTables(client: PoolClient): Promise<BackupTable[]> {
   const result = await client.query<BackupTable>(
@@ -40,12 +44,12 @@ async function listApplicationTables(client: PoolClient): Promise<BackupTable[]>
   return result.rows;
 }
 
-async function writeResetAudit(client: PoolClient, req: Request, action: string, changes: Record<string, unknown>): Promise<void> {
+async function writeResetAudit(client: PoolClient, req: Request, action: string, changes: Record<string, unknown>, userId: string | null = req.user!.userId): Promise<void> {
   await client.query(
     `INSERT INTO audit_logs (user_id, action, entity_type, changes, ip_address, user_agent, origin, created_at)
      VALUES ($1, $2, 'database', $3::jsonb, $4, $5, $6, NOW())`,
     [
-      req.user!.userId,
+      userId,
       action,
       JSON.stringify(changes),
       req.ip?.slice(0, 45) ?? null,
@@ -55,8 +59,8 @@ async function writeResetAudit(client: PoolClient, req: Request, action: string,
   );
 }
 
-async function truncateApplicationData(client: PoolClient): Promise<string[]> {
-  const tables = (await listApplicationTables(client)).filter((table) => !isPreservedTable(table));
+async function truncateApplicationData(client: PoolClient, includeUsers = false): Promise<string[]> {
+  const tables = (await listApplicationTables(client)).filter((table) => !isMigrationTable(table) && (includeUsers || !(table.schema === 'public' && AUTH_PUBLIC_TABLES.has(table.name))));
   if (!tables.length) return [];
   const names = tables.map((table) => `${quoteIdentifier(table.schema)}.${quoteIdentifier(table.name)}`).join(', ');
   await client.query(`TRUNCATE TABLE ${names} RESTART IDENTITY CASCADE`);
@@ -234,15 +238,17 @@ function parseBackupSequence(statement: string): { schema: string; name: string 
   return schema && name ? { schema, name } : null;
 }
 
-async function validateBackupFile(client: PoolClient, backupSql: string): Promise<string[]> {
-  if (!backupSql.includes('-- SIES PostgreSQL data-only backup; protected account tables are intentionally excluded')) {
+async function validateBackupFile(client: PoolClient, backupSql: string): Promise<{ statements: string[]; includeUsers: boolean }> {
+  const includeUsers = backupSql.includes('-- SIES PostgreSQL full data-only backup; includes accounts and authentication tables');
+  const operationalOnly = backupSql.includes('-- SIES PostgreSQL data-only backup; protected account tables are intentionally excluded');
+  if (!includeUsers && !operationalOnly) {
     throw new Error('El archivo no fue generado por el módulo de respaldos de SIES.');
   }
   const statements = splitSqlStatements(backupSql);
   if (statements.length < 3 || statements[0].toUpperCase() !== 'BEGIN' || statements[1].toLowerCase() !== 'set standard_conforming_strings = on' || statements.at(-1)?.toUpperCase() !== 'COMMIT') {
     throw new Error('El respaldo SQL no tiene el formato esperado.');
   }
-  const tables = (await listApplicationTables(client)).filter((table) => !isPreservedTable(table));
+  const tables = (await listApplicationTables(client)).filter((table) => !shouldExcludeFromBackup(table, includeUsers));
   const tablesByName = new Map(tables.map((table) => [`${table.schema}.${table.name}`, table]));
   const schemas = [...new Set(tables.map((table) => table.schema))];
   const columns = await client.query<BackupColumn>(
@@ -271,7 +277,7 @@ async function validateBackupFile(client: PoolClient, backupSql: string): Promis
        AND sequence_namespace.nspname <> 'information_schema'
        AND sequence_namespace.nspname NOT LIKE 'pg_%'
        AND NOT (table_namespace.nspname = 'public' AND owned_table.relname = ANY($1::text[]))`,
-    [[...PRESERVED_PUBLIC_TABLES]]
+    [includeUsers ? [...MIGRATION_PUBLIC_TABLES] : [...PRESERVED_PUBLIC_TABLES]]
   );
   const sequenceNames = new Set(sequences.rows.map((sequence) => `${sequence.schema}.${sequence.name}`));
   for (const statement of statements.slice(2, -1)) {
@@ -292,7 +298,7 @@ async function validateBackupFile(client: PoolClient, backupSql: string): Promis
       throw new Error('El respaldo contiene una instrucción SQL no permitida o no reconocida.');
     }
   }
-  return statements;
+  return { statements, includeUsers };
 }
 
 export async function resetDatabaseData(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -325,8 +331,11 @@ export async function restoreDatabaseBackup(req: Request, res: Response, next: N
   try {
     client = await getClient();
     let statements: string[];
+    let includeUsers = false;
     try {
-      statements = await validateBackupFile(client, req.body);
+      const backup = await validateBackupFile(client, req.body);
+      statements = backup.statements;
+      includeUsers = backup.includeUsers;
     } catch (error) {
       res.status(400).json({
         success: false,
@@ -337,12 +346,18 @@ export async function restoreDatabaseBackup(req: Request, res: Response, next: N
     }
     await client.query('BEGIN');
     transactionStarted = true;
-    const clearedTables = await truncateApplicationData(client);
+    const clearedTables = await truncateApplicationData(client, includeUsers);
     for (const statement of statements.slice(2, -1)) await client.query(statement);
-    await writeResetAudit(client, req, 'database.backup_restored', { clearedTables: clearedTables.length, format: 'sql-data-only' });
+    await writeResetAudit(
+      client,
+      req,
+      includeUsers ? 'database.full_backup_restored' : 'database.backup_restored',
+      { clearedTables: clearedTables.length, format: includeUsers ? 'sql-full-data' : 'sql-data-only', requestedByUserId: req.user!.userId },
+      includeUsers ? null : req.user!.userId
+    );
     await client.query('COMMIT');
     transactionStarted = false;
-    res.status(200).json({ success: true, restoredStatementCount: statements.length - 3, clearedTableCount: clearedTables.length });
+    res.status(200).json({ success: true, restoredStatementCount: statements.length - 3, clearedTableCount: clearedTables.length, includesUsers: includeUsers });
   } catch (error) {
     if (transactionStarted && client) await client.query('ROLLBACK').catch(() => undefined);
     next(error);
@@ -351,20 +366,20 @@ export async function restoreDatabaseBackup(req: Request, res: Response, next: N
   }
 }
 
-export async function downloadDatabaseBackup(req: Request, res: Response, next: NextFunction): Promise<void> {
+async function streamDatabaseBackup(req: Request, res: Response, next: NextFunction, includeUsers: boolean): Promise<void> {
   let client: PoolClient | null = null;
   let transactionStarted = false;
   try {
     await writeAuditEvent(req, {
-      action: 'database.backup_downloaded',
+      action: includeUsers ? 'database.full_backup_downloaded' : 'database.backup_downloaded',
       entityType: 'database',
-      changes: { format: 'sql-data-only' },
+      changes: { format: includeUsers ? 'sql-full-data' : 'sql-data-only' },
     });
     client = await getClient();
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     transactionStarted = true;
 
-    const tables = (await listApplicationTables(client)).filter((table) => !isPreservedTable(table));
+    const tables = (await listApplicationTables(client)).filter((table) => !shouldExcludeFromBackup(table, includeUsers));
     const schemas = [...new Set(tables.map((table) => table.schema))];
     const [columnResult, primaryKeyResult, foreignKeyResult] = await Promise.all([
       client.query<BackupColumn>(
@@ -404,9 +419,15 @@ export async function downloadDatabaseBackup(req: Request, res: Response, next: 
 
     res.status(200);
     res.setHeader('Content-Type', 'application/sql; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="sies-database-backup-${new Date().toISOString().slice(0, 10)}.sql"`);
+    res.setHeader('Content-Disposition', `attachment; filename="sies-database-${includeUsers ? 'full-' : ''}backup-${new Date().toISOString().slice(0, 10)}.sql"`);
     res.setHeader('Cache-Control', 'no-store, private');
-    await writeChunk(res, `-- SIES PostgreSQL data-only backup; protected account tables are intentionally excluded\n-- Generated at ${new Date().toISOString()}\n-- Restore with the administrator backup restore module into a database with the matching schema\n\nBEGIN;\nSET standard_conforming_strings = on;\n\n`);
+    const backupHeader = includeUsers
+      ? '-- SIES PostgreSQL full data-only backup; includes accounts and authentication tables'
+      : '-- SIES PostgreSQL data-only backup; protected account tables are intentionally excluded';
+    const restoreNote = includeUsers
+      ? '-- This restore replaces users and authentication records; sign in afterward with an account from this backup'
+      : '-- This restore keeps users and authentication records in the target database';
+    await writeChunk(res, `${backupHeader}\n-- Generated at ${new Date().toISOString()}\n${restoreNote}\n-- Restore into a database with the matching schema\n\nBEGIN;\nSET standard_conforming_strings = on;\n\n`);
 
     const orderedTables = orderTables(tables, foreignKeyResult.rows);
     let offset = 0;
@@ -451,7 +472,7 @@ export async function downloadDatabaseBackup(req: Request, res: Response, next: 
          AND sequence_namespace.nspname NOT LIKE 'pg_%'
          AND NOT (table_namespace.nspname = 'public' AND owned_table.relname = ANY($1::text[]))
        ORDER BY sequence_namespace.nspname, sequence.relname`,
-      [[...PRESERVED_PUBLIC_TABLES]]
+      [includeUsers ? [...MIGRATION_PUBLIC_TABLES] : [...PRESERVED_PUBLIC_TABLES]]
     );
     for (const sequence of sequenceResult.rows) {
       const qualifiedSequence = `${quoteIdentifier(sequence.schema)}.${quoteIdentifier(sequence.name)}`;
@@ -473,4 +494,12 @@ export async function downloadDatabaseBackup(req: Request, res: Response, next: 
   } finally {
     client?.release();
   }
+}
+
+export async function downloadDatabaseBackup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await streamDatabaseBackup(req, res, next, false);
+}
+
+export async function downloadFullDatabaseBackup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await streamDatabaseBackup(req, res, next, true);
 }

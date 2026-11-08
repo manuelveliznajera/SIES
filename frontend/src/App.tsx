@@ -2138,12 +2138,14 @@ export function App() {
     }
   };
 
-  const handleDownloadDatabaseBackup = async () => {
+  const handleDownloadDatabaseBackup = async (includeUsers = false) => {
     if (currentUserRole !== 'admin' || databaseBackupLoading) return;
     const confirmation = await Swal.fire({
       icon: 'warning',
-      title: 'Generar respaldo SQL',
-      text: 'El archivo contiene estudios, asignaciones, entrevistas, respuestas y bitácoras. Excluye las cuentas y datos necesarios para iniciar sesión; guárdalo en un lugar seguro.',
+      title: includeUsers ? 'Generar respaldo completo' : 'Generar respaldo SQL',
+      text: includeUsers
+        ? 'Incluye todos los registros, usuarios, perfiles, roles y datos de autenticación. Contiene hashes de contraseñas y sesiones; protégelo. Al restaurarlo, reemplazará también las cuentas de la base local.'
+        : 'Incluye estudios, asignaciones, entrevistas, respuestas y bitácoras, pero excluye las cuentas y datos necesarios para iniciar sesión.',
       showCancelButton: true,
       confirmButtonText: 'Generar y descargar',
       cancelButtonText: 'Cancelar',
@@ -2152,8 +2154,8 @@ export function App() {
     if (!confirmation.isConfirmed) return;
     setDatabaseBackupLoading(true);
     try {
-      await downloadDatabaseBackup();
-      await Swal.fire({ icon: 'success', title: 'Respaldo descargado', text: 'El archivo SQL de registros se descargó correctamente.', timer: 2000, showConfirmButton: false });
+      await downloadDatabaseBackup(includeUsers);
+      await Swal.fire({ icon: 'success', title: 'Respaldo descargado', text: includeUsers ? 'El respaldo completo se descargó. En la base local, restáuralo sobre el mismo esquema.' : 'El archivo SQL de registros se descargó correctamente.', timer: 2400, showConfirmButton: false });
     } catch (error) {
       await Swal.fire({ icon: 'error', title: 'No se pudo generar el respaldo', text: error instanceof Error ? error.message : 'Ocurrió un error al generar el archivo SQL.' });
     } finally {
@@ -2202,10 +2204,19 @@ export function App() {
       await Swal.fire({ icon: 'error', title: 'Archivo demasiado grande', text: 'El límite para restaurar un respaldo desde la aplicación es de 50 MB.' });
       return;
     }
+    const fileHeader = await file.slice(0, 1024).text();
+    const includesUsers = fileHeader.includes('-- SIES PostgreSQL full data-only backup; includes accounts and authentication tables');
     const confirmation = await Swal.fire({
       icon: 'warning',
-      title: '¿Restaurar este respaldo?',
-      text: `Se reemplazarán todos los datos actuales de la aplicación con el contenido de ${file.name}. Los usuarios y sus accesos se conservarán.`,
+      title: includesUsers ? '¿Restaurar respaldo completo?' : '¿Restaurar este respaldo?',
+      text: includesUsers
+        ? `Se reemplazarán todos los datos, incluidos usuarios, roles, perfiles y sesiones locales, con el contenido de ${file.name}. Después tendrás que iniciar sesión con una cuenta incluida en el respaldo. Escribe RESTAURAR TODO para continuar.`
+        : `Se reemplazarán los datos operativos actuales con el contenido de ${file.name}. Los usuarios y sus accesos locales se conservarán.`,
+      ...(includesUsers ? {
+        input: 'text' as const,
+        inputPlaceholder: 'Escribe RESTAURAR TODO',
+        inputValidator: (value: string) => value.trim().toUpperCase() === 'RESTAURAR TODO' ? null : 'Escribe RESTAURAR TODO para confirmar.',
+      } : {}),
       showCancelButton: true,
       confirmButtonText: 'Restaurar respaldo',
       cancelButtonText: 'Cancelar',
@@ -2220,7 +2231,9 @@ export function App() {
       const pendingRecords = pending.map((item) => ({ ...item.record, deviceUuid: item.deviceUuid }));
       setInterviews(mergeInterviewRecords(pendingRecords, freshInterviews));
       setSelectedSurveyId(freshSurveys.find((survey) => survey.status === 'active')?.id ?? '');
-      await Swal.fire({ icon: 'success', title: 'Respaldo restaurado', text: `Se aplicaron ${result.restoredStatementCount} instrucciones. Las cuentas de usuario se conservaron.`, timer: 2600, showConfirmButton: false });
+      await Swal.fire({ icon: 'success', title: 'Respaldo restaurado', text: result.includesUsers
+        ? `Se aplicaron ${result.restoredStatementCount} instrucciones. También se reemplazaron los usuarios locales; inicia sesión con una cuenta del respaldo.`
+        : `Se aplicaron ${result.restoredStatementCount} instrucciones. Las cuentas de usuario locales se conservaron.`, timer: 3200, showConfirmButton: false });
     } catch (error) {
       await Swal.fire({ icon: 'error', title: 'No se pudo restaurar', text: error instanceof Error ? error.message : 'Error al restaurar el respaldo.' });
     } finally {
@@ -4571,18 +4584,20 @@ export function App() {
             <div className="panel-header">
               <div>
                 <h2 className="panel-title" id="database-backup-title"><Database size={20} style={{ color: '#05a6f0' }} /> Respaldo de base de datos</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '.82rem', marginTop: '.3rem' }}>Genera y descarga un archivo SQL con los registros actuales de las tablas de la aplicación.</p>
+                <p style={{ color: 'var(--text-muted)', fontSize: '.82rem', marginTop: '.3rem' }}>Descarga un respaldo de datos de producción para restaurarlo en una base local con el mismo esquema.</p>
               </div>
               <span className="badge badge-primary">Solo administrador</span>
             </div>
             <div style={{ display: 'grid', gap: '.75rem', margin: '1rem 0 1.25rem', padding: '1rem', border: '1px solid #d5eaf5', borderRadius: 'var(--radius-sm)', background: '#f2f9fc', color: '#334155', fontSize: '.86rem', lineHeight: 1.6 }}>
-              <p><strong>El archivo incluye datos</strong> de estudios, geografía, asignaciones, entrevistas, respuestas, bitácoras y demás tablas operativas.</p>
-              <p><strong>Se omiten las cuentas y tablas de autenticación</strong> (usuarios, roles, sesiones y perfiles de encuestador). Para restaurar, usa este archivo en la misma instalación donde se conservaron esos usuarios y donde el esquema ya está creado.</p>
-              <p><strong>Trátalo como información confidencial.</strong> Incluye respuestas de encuestas y datos operativos; almacénalo en una ubicación protegida.</p>
+              <p><strong>Respaldo de registros:</strong> incluye las tablas operativas y conserva las cuentas existentes en el destino.</p>
+              <p><strong>Respaldo completo:</strong> incluye también usuarios, roles, perfiles de encuestador y autenticación. Al restaurarlo reemplaza las cuentas locales; inicia sesión después con una cuenta del respaldo. Ambos respaldos contienen información confidencial y requieren que el esquema ya esté creado y corresponda a la misma versión.</p>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '.65rem' }}>
               <button type="button" className="btn btn-primary" onClick={() => void handleDownloadDatabaseBackup()} disabled={databaseBackupLoading || databaseResetLoading || databaseRestoreLoading}>
                 <Download size={16} /> {databaseBackupLoading ? 'Generando respaldo...' : 'Descargar respaldo SQL'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => void handleDownloadDatabaseBackup(true)} disabled={databaseBackupLoading || databaseResetLoading || databaseRestoreLoading} style={{ color: '#075985', borderColor: 'rgba(5, 166, 240, .4)' }}>
+                <Download size={16} /> {databaseBackupLoading ? 'Generando respaldo...' : 'Descargar respaldo completo (incluye usuarios)'}
               </button>
               <button type="button" className="btn btn-secondary" onClick={() => databaseBackupInput.current?.click()} disabled={databaseBackupLoading || databaseResetLoading || databaseRestoreLoading} style={{ color: '#087a55', borderColor: 'rgba(8, 122, 85, .3)' }}>
                 <Database size={16} /> {databaseRestoreLoading ? 'Restaurando respaldo...' : 'Subir y restaurar respaldo SQL'}
@@ -4604,7 +4619,7 @@ export function App() {
               />
             </div>
             <p style={{ color: 'var(--text-muted)', fontSize: '.78rem', lineHeight: 1.5, marginTop: '.8rem' }}>
-              La restauración reemplaza los datos operativos actuales, conserva los usuarios y se revierte completa si el archivo no puede aplicarse. Solo admite respaldos SQL generados desde este módulo (máximo 50 MB).
+              La restauración se ejecuta en una transacción y se revierte si falla. El respaldo completo también reemplaza los usuarios locales. Solo admite archivos SQL generados desde este módulo (máximo 50 MB); para volúmenes mayores, usa una herramienta PostgreSQL como pg_dump/pg_restore.
             </p>
           </section>
         )}

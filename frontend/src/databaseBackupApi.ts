@@ -19,8 +19,8 @@ async function getErrorMessage(response: Response, fallback: string): Promise<st
   return fallback;
 }
 
-export async function downloadDatabaseBackup(): Promise<void> {
-  const response = await authenticatedFetch();
+export async function downloadDatabaseBackup(includeUsers = false): Promise<void> {
+  const response = await authenticatedFetch(includeUsers ? `${apiBase}/database-backup/full` : `${apiBase}/database-backup`);
   if (!response.ok) {
     throw new Error(await getErrorMessage(response, 'No se pudo generar el respaldo de la base de datos.'));
   }
@@ -29,7 +29,7 @@ export async function downloadDatabaseBackup(): Promise<void> {
   const objectUrl = URL.createObjectURL(backup);
   const link = document.createElement('a');
   link.href = objectUrl;
-  link.download = `sies-database-backup-${date}.sql`;
+  link.download = `sies-database-${includeUsers ? 'full-' : ''}backup-${date}.sql`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -44,14 +44,14 @@ export async function resetDatabaseData(): Promise<{ clearedTableCount: number }
   return { clearedTableCount: payload.clearedTableCount };
 }
 
-export async function restoreDatabaseBackup(file: File): Promise<{ restoredStatementCount: number }> {
+export async function restoreDatabaseBackup(file: File): Promise<{ restoredStatementCount: number; includesUsers: boolean }> {
   const response = await authenticatedFetch(`${apiBase}/database-backup/restore`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/sql' },
     body: await file.text(),
   });
   if (!response.ok) throw new Error(await getErrorMessage(response, 'No se pudo restaurar el respaldo.'));
-  const payload = await response.json() as { success?: boolean; restoredStatementCount?: number };
+  const payload = await response.json() as { success?: boolean; restoredStatementCount?: number; includesUsers?: boolean };
   if (!payload.success || typeof payload.restoredStatementCount !== 'number') throw new Error('El servidor devolvió una respuesta de restauración inválida.');
-  return { restoredStatementCount: payload.restoredStatementCount };
+  return { restoredStatementCount: payload.restoredStatementCount, includesUsers: payload.includesUsers === true };
 }
