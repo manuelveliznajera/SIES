@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import L from 'leaflet';
 import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
 import jsPDF from 'jspdf';
@@ -38,6 +38,7 @@ import {
   type AuditEventRecord,
 } from './adminLogsApi';
 import { createCommunityAssignment, updateCommunityAssignment } from './assignmentsApi';
+import { downloadDatabaseBackup, resetDatabaseData as resetDatabaseDataRequest, restoreDatabaseBackup as restoreDatabaseBackupRequest } from './databaseBackupApi';
 import {
   Vote,
   MapPin,
@@ -45,6 +46,7 @@ import {
   Wifi,
   WifiOff,
   BarChart3,
+  Database,
   Plus,
   RefreshCw,
   Layers,
@@ -397,12 +399,16 @@ function FitMapToInterviews({ records }: { records: InterviewRecord[] }) {
 
 export function App() {
   // Pestaña activa
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'reports' | 'builder' | 'survey' | 'map' | 'surveys_list' | 'supervisors' | 'users' | 'admin_config'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'reports' | 'builder' | 'survey' | 'map' | 'surveys_list' | 'supervisors' | 'users' | 'admin_config' | 'database_backup'>('dashboard');
   const [reportCommunityFilter, setReportCommunityFilter] = useState('all');
   const [adminLogsTab, setAdminLogsTab] = useState<'audit' | 'errors'>('audit');
   const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
   const [applicationErrors, setApplicationErrors] = useState<ApplicationErrorRecord[]>([]);
   const [adminLogsLoading, setAdminLogsLoading] = useState(false);
+  const [databaseBackupLoading, setDatabaseBackupLoading] = useState(false);
+  const [databaseResetLoading, setDatabaseResetLoading] = useState(false);
+  const [databaseRestoreLoading, setDatabaseRestoreLoading] = useState(false);
+  const databaseBackupInput = useRef<HTMLInputElement>(null);
   const [adminLogsError, setAdminLogsError] = useState<string | null>(null);
   const [adminLogsSearch, setAdminLogsSearch] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -2123,6 +2129,96 @@ export function App() {
     }
   };
 
+  const handleDownloadDatabaseBackup = async () => {
+    if (currentUserRole !== 'admin' || databaseBackupLoading) return;
+    const confirmation = await Swal.fire({
+      icon: 'warning',
+      title: 'Generar respaldo SQL',
+      text: 'El archivo contiene estudios, asignaciones, entrevistas, respuestas y bitácoras. Excluye las cuentas y datos necesarios para iniciar sesión; guárdalo en un lugar seguro.',
+      showCancelButton: true,
+      confirmButtonText: 'Generar y descargar',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#05a6f0',
+    });
+    if (!confirmation.isConfirmed) return;
+    setDatabaseBackupLoading(true);
+    try {
+      await downloadDatabaseBackup();
+      await Swal.fire({ icon: 'success', title: 'Respaldo descargado', text: 'El archivo SQL de registros se descargó correctamente.', timer: 2000, showConfirmButton: false });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo generar el respaldo', text: error instanceof Error ? error.message : 'Ocurrió un error al generar el archivo SQL.' });
+    } finally {
+      setDatabaseBackupLoading(false);
+    }
+  };
+
+  const handleResetDatabaseData = async () => {
+    if (currentUserRole !== 'admin' || databaseResetLoading || databaseRestoreLoading) return;
+    const confirmation = await Swal.fire({
+      icon: 'warning',
+      title: '¿Vaciar los datos de la aplicación?',
+      html: 'Se eliminarán estudios, comunidades, asignaciones, encuestas realizadas, respuestas, bitácoras y errores. <strong>Se conservarán usuarios, roles y perfiles de encuestador</strong> para mantener el acceso. Esta acción no se puede deshacer.',
+      input: 'text',
+      inputPlaceholder: 'Escribe RESETEAR',
+      inputValidator: (value) => value.trim().toUpperCase() === 'RESETEAR' ? null : 'Escribe RESETEAR para confirmar.',
+      showCancelButton: true,
+      confirmButtonText: 'Resetear datos',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#b42318',
+    });
+    if (!confirmation.isConfirmed) return;
+    setDatabaseResetLoading(true);
+    try {
+      const result = await resetDatabaseDataRequest();
+      setInterviews([]);
+      setSurveys([]);
+      setSelectedSurveyId('');
+      const freshSurveys = await listSurveys().catch(() => []);
+      setSurveys(freshSurveys);
+      await Swal.fire({ icon: 'success', title: 'Datos reseteados', text: `Se limpiaron ${result.clearedTableCount} tablas de datos. Las cuentas de usuario se conservaron.`, timer: 2600, showConfirmButton: false });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo resetear', text: error instanceof Error ? error.message : 'Error al limpiar los datos.' });
+    } finally {
+      setDatabaseResetLoading(false);
+    }
+  };
+
+  const handleRestoreDatabaseBackup = async (file: File) => {
+    if (currentUserRole !== 'admin' || databaseResetLoading || databaseRestoreLoading) return;
+    if (!file.name.toLowerCase().endsWith('.sql')) {
+      await Swal.fire({ icon: 'error', title: 'Archivo no válido', text: 'Selecciona un archivo .sql generado desde este módulo.' });
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      await Swal.fire({ icon: 'error', title: 'Archivo demasiado grande', text: 'El límite para restaurar un respaldo desde la aplicación es de 50 MB.' });
+      return;
+    }
+    const confirmation = await Swal.fire({
+      icon: 'warning',
+      title: '¿Restaurar este respaldo?',
+      text: `Se reemplazarán todos los datos actuales de la aplicación con el contenido de ${file.name}. Los usuarios y sus accesos se conservarán.`,
+      showCancelButton: true,
+      confirmButtonText: 'Restaurar respaldo',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#b42318',
+    });
+    if (!confirmation.isConfirmed) return;
+    setDatabaseRestoreLoading(true);
+    try {
+      const result = await restoreDatabaseBackupRequest(file);
+      const [freshSurveys, freshInterviews, pending] = await Promise.all([listSurveys(), listInterviews(), getPendingInterviews()]);
+      setSurveys(freshSurveys);
+      const pendingRecords = pending.map((item) => ({ ...item.record, deviceUuid: item.deviceUuid }));
+      setInterviews(mergeInterviewRecords(pendingRecords, freshInterviews));
+      setSelectedSurveyId(freshSurveys.find((survey) => survey.status === 'active')?.id ?? '');
+      await Swal.fire({ icon: 'success', title: 'Respaldo restaurado', text: `Se aplicaron ${result.restoredStatementCount} instrucciones. Las cuentas de usuario se conservaron.`, timer: 2600, showConfirmButton: false });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo restaurar', text: error instanceof Error ? error.message : 'Error al restaurar el respaldo.' });
+    } finally {
+      setDatabaseRestoreLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab !== 'admin_config' || currentUserRole !== 'admin') return;
     void handleRefreshAdminLogs();
@@ -2361,6 +2457,15 @@ export function App() {
             >
               <Settings2 size={16} />
               Bitácora y Errores
+            </button>
+          )}
+          {currentUserRole === 'admin' && (
+            <button
+              type="button"
+              className={`tab-btn ${activeTab === 'database_backup' ? 'active' : ''}`}
+              onClick={() => setActiveTab('database_backup')}
+            >
+              <Database size={16} /> Respaldo de Base de Datos
             </button>
           )}
         </nav>
@@ -4441,6 +4546,49 @@ export function App() {
               </div>
             )}
             <p className="admin-logs-retention-note">Se muestran hasta 100 registros recientes. El sistema guarda IP, navegador y origen web como referencia de acceso; no determina una ubicación geográfica precisa.</p>
+          </section>
+        )}
+
+        {activeTab === 'database_backup' && currentUserRole === 'admin' && (
+          <section className="glass-panel" aria-labelledby="database-backup-title" style={{ maxWidth: 900, margin: '0 auto' }}>
+            <div className="panel-header">
+              <div>
+                <h2 className="panel-title" id="database-backup-title"><Database size={20} style={{ color: '#05a6f0' }} /> Respaldo de base de datos</h2>
+                <p style={{ color: 'var(--text-muted)', fontSize: '.82rem', marginTop: '.3rem' }}>Genera y descarga un archivo SQL con los registros actuales de las tablas de la aplicación.</p>
+              </div>
+              <span className="badge badge-primary">Solo administrador</span>
+            </div>
+            <div style={{ display: 'grid', gap: '.75rem', margin: '1rem 0 1.25rem', padding: '1rem', border: '1px solid #d5eaf5', borderRadius: 'var(--radius-sm)', background: '#f2f9fc', color: '#334155', fontSize: '.86rem', lineHeight: 1.6 }}>
+              <p><strong>El archivo incluye datos</strong> de estudios, geografía, asignaciones, entrevistas, respuestas, bitácoras y demás tablas operativas.</p>
+              <p><strong>Se omiten las cuentas y tablas de autenticación</strong> (usuarios, roles, sesiones y perfiles de encuestador). Para restaurar, usa este archivo en la misma instalación donde se conservaron esos usuarios y donde el esquema ya está creado.</p>
+              <p><strong>Trátalo como información confidencial.</strong> Incluye respuestas de encuestas y datos operativos; almacénalo en una ubicación protegida.</p>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '.65rem' }}>
+              <button type="button" className="btn btn-primary" onClick={() => void handleDownloadDatabaseBackup()} disabled={databaseBackupLoading || databaseResetLoading || databaseRestoreLoading}>
+                <Download size={16} /> {databaseBackupLoading ? 'Generando respaldo...' : 'Descargar respaldo SQL'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => databaseBackupInput.current?.click()} disabled={databaseBackupLoading || databaseResetLoading || databaseRestoreLoading} style={{ color: '#087a55', borderColor: 'rgba(8, 122, 85, .3)' }}>
+                <Database size={16} /> {databaseRestoreLoading ? 'Restaurando respaldo...' : 'Subir y restaurar respaldo SQL'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => void handleResetDatabaseData()} disabled={databaseBackupLoading || databaseResetLoading || databaseRestoreLoading} style={{ color: '#b42318', borderColor: 'rgba(180, 35, 24, .3)' }}>
+                <Trash2 size={16} /> {databaseResetLoading ? 'Reseteando datos...' : 'Resetear datos (conservar usuarios)'}
+              </button>
+              <input
+                ref={databaseBackupInput}
+                type="file"
+                accept=".sql,application/sql"
+                aria-label="Seleccionar respaldo SQL"
+                style={{ display: 'none' }}
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = '';
+                  if (file) void handleRestoreDatabaseBackup(file);
+                }}
+              />
+            </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '.78rem', lineHeight: 1.5, marginTop: '.8rem' }}>
+              La restauración reemplaza los datos operativos actuales, conserva los usuarios y se revierte completa si el archivo no puede aplicarse. Solo admite respaldos SQL generados desde este módulo (máximo 50 MB).
+            </p>
           </section>
         )}
       </main>
