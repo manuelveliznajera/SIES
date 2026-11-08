@@ -817,8 +817,8 @@ export function App() {
       const mayorVote = getInterviewAnswer(record, tableMayorVoteQuestion);
       const presidentVote = getInterviewAnswer(record, tablePresidentVoteQuestion);
       return normalize(record.id).includes(normalize(interviewTableFilters.folio))
-        && normalize(record.enumeratorAlias).includes(normalize(interviewTableFilters.enumerator))
-        && normalize(record.community).includes(normalize(interviewTableFilters.community))
+        && (!interviewTableFilters.enumerator || normalize(record.enumeratorAlias) === normalize(interviewTableFilters.enumerator))
+        && (!interviewTableFilters.community || normalize(record.community) === normalize(interviewTableFilters.community))
         && normalize(`${record.ageGroup} ${record.gender}`).includes(normalize(interviewTableFilters.profile))
         && (!interviewTableFilters.date || guatemalaDate(record.timestamp) === interviewTableFilters.date)
         && (!interviewTableFilters.mayorVote || mayorVote === interviewTableFilters.mayorVote)
@@ -829,6 +829,15 @@ export function App() {
   const paginatedInterviewRows = interviewTableRows.slice((interviewTablePage - 1) * 10, interviewTablePage * 10);
   const mayorVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews.map((record) => getInterviewAnswer(record, tableMayorVoteQuestion)).filter((answer) => answer !== '—'))].sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tableMayorVoteQuestion]);
   const presidentVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews.map((record) => getInterviewAnswer(record, tablePresidentVoteQuestion)).filter((answer) => answer !== '—'))].sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tablePresidentVoteQuestion]);
+  const interviewEnumeratorFilterOptions = useMemo(() => {
+    const byAlias = new Map<string, string>();
+    currentSurveyInterviews.forEach((record) => byAlias.set(record.enumeratorAlias, record.enumeratorName || record.enumeratorAlias));
+    return [...byAlias.entries()].sort((a, b) => a[1].localeCompare(b[1], 'es'));
+  }, [currentSurveyInterviews]);
+  const interviewCommunityFilterOptions = useMemo(
+    () => [...new Set(currentSurveyInterviews.map((record) => record.community.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es')),
+    [currentSurveyInterviews]
+  );
   const updateInterviewTableFilter = (key: keyof typeof interviewTableFilters, value: string) => {
     setInterviewTableFilters((previous) => ({ ...previous, [key]: value }));
     setInterviewTablePage(1);
@@ -3736,8 +3745,16 @@ export function App() {
                     </tr>
                     <tr>
                       <th><input className="form-input" aria-label="Filtrar por número de encuesta" placeholder="Buscar folio" value={interviewTableFilters.folio} onChange={(event) => updateInterviewTableFilter('folio', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
-                      <th><input className="form-input" aria-label="Filtrar por encuestador" placeholder="Buscar usuario" value={interviewTableFilters.enumerator} onChange={(event) => updateInterviewTableFilter('enumerator', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
-                      <th><input className="form-input" aria-label="Filtrar por comunidad" placeholder="Buscar comunidad" value={interviewTableFilters.community} onChange={(event) => updateInterviewTableFilter('community', event.target.value)} style={{ minWidth: 130, padding: '.4rem', fontSize: '.72rem' }} /></th>
+                      <th>
+                        <select className="form-select" aria-label="Filtrar por encuestador" value={interviewTableFilters.enumerator} onChange={(event) => updateInterviewTableFilter('enumerator', event.target.value)} style={{ minWidth: 145, padding: '.4rem', fontSize: '.72rem' }}>
+                          <option value="">Todos</option>{interviewEnumeratorFilterOptions.map(([alias, fullName]) => <option key={alias} value={alias}>{fullName} (@{alias})</option>)}
+                        </select>
+                      </th>
+                      <th>
+                        <select className="form-select" aria-label="Filtrar por comunidad" value={interviewTableFilters.community} onChange={(event) => updateInterviewTableFilter('community', event.target.value)} style={{ minWidth: 145, padding: '.4rem', fontSize: '.72rem' }}>
+                          <option value="">Todas</option>{interviewCommunityFilterOptions.map((community) => <option key={community} value={community}>{community}</option>)}
+                        </select>
+                      </th>
                       <th><input className="form-input" aria-label="Filtrar por edad o género" placeholder="Edad o género" value={interviewTableFilters.profile} onChange={(event) => updateInterviewTableFilter('profile', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
                       <th><input className="form-input" aria-label="Filtrar por fecha" type="date" value={interviewTableFilters.date} onChange={(event) => updateInterviewTableFilter('date', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }} /></th>
                       <th>
