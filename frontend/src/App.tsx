@@ -365,6 +365,13 @@ function mergeInterviewRecords(pending: InterviewRecord[], loaded: InterviewReco
   });
 }
 
+function getInterviewAnswer(record: InterviewRecord, question?: SurveyQuestion): string {
+  if (!question) return '—';
+  return record.answers.find((answer) => answer.questionId === question.id)?.answerText
+    ?? record.answers.find((answer) => answer.questionTitle.trim().toLocaleLowerCase() === question.title.trim().toLocaleLowerCase())?.answerText
+    ?? '—';
+}
+
 const interviewMarkerIcon = L.divIcon({
   className: 'interview-map-marker',
   html: '<span></span>',
@@ -537,6 +544,10 @@ export function App() {
 
   const [dashboardChartType, setDashboardChartType] = useState<'bar' | 'pie'>('bar');
   const [newInterviewNotificationId, setNewInterviewNotificationId] = useState<string | null>(null);
+  const [interviewTableFilters, setInterviewTableFilters] = useState({
+    folio: '', enumerator: '', community: '', profile: '', date: '', mayorVote: '', presidentVote: '',
+  });
+  const [interviewTablePage, setInterviewTablePage] = useState(1);
 
   // ── BASE DE DATOS DE ENCUESTAS (CON COMUNIDADES ASIGNADAS POR ADMIN) ──
   const [surveys, setSurveys] = useState<FullSurvey[]>([]);
@@ -782,6 +793,46 @@ export function App() {
     () => interviews.filter((record) => record.surveyId === currentSurvey.id),
     [interviews, currentSurvey.id]
   );
+  const tableMayorVoteQuestion = currentSurvey.questions[5] ?? currentSurvey.questions.find((question) => {
+    const title = question.title.toLocaleLowerCase();
+    return title.includes('alcalde') && /(vot|candidat|eleccion|preparad)/.test(title);
+  });
+  const tablePresidentVoteQuestion = currentSurvey.questions.find((question) => question.title.toLocaleLowerCase().includes('presidente'));
+  const interviewTableRows = useMemo(() => {
+    const normalize = (value: string) => value.trim().toLocaleLowerCase();
+    const guatemalaDate = (value: string) => {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Guatemala', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+      const part = (type: string) => parts.find((item) => item.type === type)?.value ?? '';
+      return `${part('year')}-${part('month')}-${part('day')}`;
+    };
+    return currentSurveyInterviews.filter((record) => {
+      const mayorVote = getInterviewAnswer(record, tableMayorVoteQuestion);
+      const presidentVote = getInterviewAnswer(record, tablePresidentVoteQuestion);
+      return normalize(record.id).includes(normalize(interviewTableFilters.folio))
+        && normalize(record.enumeratorAlias).includes(normalize(interviewTableFilters.enumerator))
+        && normalize(record.community).includes(normalize(interviewTableFilters.community))
+        && normalize(`${record.ageGroup} ${record.gender}`).includes(normalize(interviewTableFilters.profile))
+        && (!interviewTableFilters.date || guatemalaDate(record.timestamp) === interviewTableFilters.date)
+        && (!interviewTableFilters.mayorVote || mayorVote === interviewTableFilters.mayorVote)
+        && (!interviewTableFilters.presidentVote || presidentVote === interviewTableFilters.presidentVote);
+    });
+  }, [currentSurveyInterviews, interviewTableFilters, tableMayorVoteQuestion, tablePresidentVoteQuestion]);
+  const interviewTablePageCount = Math.max(1, Math.ceil(interviewTableRows.length / 10));
+  const paginatedInterviewRows = interviewTableRows.slice((interviewTablePage - 1) * 10, interviewTablePage * 10);
+  const mayorVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews.map((record) => getInterviewAnswer(record, tableMayorVoteQuestion)).filter((answer) => answer !== '—'))].sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tableMayorVoteQuestion]);
+  const presidentVoteFilterOptions = useMemo(() => [...new Set(currentSurveyInterviews.map((record) => getInterviewAnswer(record, tablePresidentVoteQuestion)).filter((answer) => answer !== '—'))].sort((a, b) => a.localeCompare(b, 'es')), [currentSurveyInterviews, tablePresidentVoteQuestion]);
+  const updateInterviewTableFilter = (key: keyof typeof interviewTableFilters, value: string) => {
+    setInterviewTableFilters((previous) => ({ ...previous, [key]: value }));
+    setInterviewTablePage(1);
+  };
+  useEffect(() => {
+    setInterviewTablePage(1);
+  }, [currentSurvey.id]);
+  useEffect(() => {
+    if (interviewTablePage > interviewTablePageCount) setInterviewTablePage(interviewTablePageCount);
+  }, [interviewTablePage, interviewTablePageCount]);
   const reportCommunities = useMemo(
     () => [...new Set(currentSurveyInterviews.map((record) => record.community.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es')),
     [currentSurveyInterviews]
@@ -3550,7 +3601,7 @@ export function App() {
                   </p>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', flexWrap: 'wrap' }}>
-                  <span className="badge badge-primary">{currentSurveyInterviews.length} Encuestas Registradas</span>
+                  <span className="badge badge-primary">{interviewTableRows.length} de {currentSurveyInterviews.length} encuestas</span>
                   {currentUserRole === 'admin' && (
                     <button
                       type="button"
@@ -3574,15 +3625,33 @@ export function App() {
                       <th>Comunidad Asignada</th>
                       <th>Edad / Género</th>
                       <th>Fecha / Hora</th>
-                      <th>Voto Alcalde</th>
+                      <th title={tableMayorVoteQuestion?.title ?? 'Pregunta 6 del estudio'}>Voto Alcalde · P6</th>
                       <th>Voto Presidente</th>
                       <th>Acciones</th>
                     </tr>
+                    <tr>
+                      <th><input className="form-input" aria-label="Filtrar por número de encuesta" placeholder="Buscar folio" value={interviewTableFilters.folio} onChange={(event) => updateInterviewTableFilter('folio', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
+                      <th><input className="form-input" aria-label="Filtrar por encuestador" placeholder="Buscar usuario" value={interviewTableFilters.enumerator} onChange={(event) => updateInterviewTableFilter('enumerator', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
+                      <th><input className="form-input" aria-label="Filtrar por comunidad" placeholder="Buscar comunidad" value={interviewTableFilters.community} onChange={(event) => updateInterviewTableFilter('community', event.target.value)} style={{ minWidth: 130, padding: '.4rem', fontSize: '.72rem' }} /></th>
+                      <th><input className="form-input" aria-label="Filtrar por edad o género" placeholder="Edad o género" value={interviewTableFilters.profile} onChange={(event) => updateInterviewTableFilter('profile', event.target.value)} style={{ minWidth: 115, padding: '.4rem', fontSize: '.72rem' }} /></th>
+                      <th><input className="form-input" aria-label="Filtrar por fecha" type="date" value={interviewTableFilters.date} onChange={(event) => updateInterviewTableFilter('date', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }} /></th>
+                      <th>
+                        <select className="form-select" aria-label="Filtrar por respuesta a la pregunta 6" value={interviewTableFilters.mayorVote} onChange={(event) => updateInterviewTableFilter('mayorVote', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }}>
+                          <option value="">Todas</option>{mayorVoteFilterOptions.map((answer) => <option key={answer} value={answer}>{answer}</option>)}
+                        </select>
+                      </th>
+                      <th>
+                        <select className="form-select" aria-label="Filtrar por voto de Presidente" value={interviewTableFilters.presidentVote} onChange={(event) => updateInterviewTableFilter('presidentVote', event.target.value)} style={{ minWidth: 135, padding: '.4rem', fontSize: '.72rem' }}>
+                          <option value="">Todas</option>{presidentVoteFilterOptions.map((answer) => <option key={answer} value={answer}>{answer}</option>)}
+                        </select>
+                      </th>
+                      <th><button type="button" className="btn btn-secondary" onClick={() => { setInterviewTableFilters({ folio: '', enumerator: '', community: '', profile: '', date: '', mayorVote: '', presidentVote: '' }); setInterviewTablePage(1); }} style={{ padding: '.4rem .55rem', fontSize: '.7rem', whiteSpace: 'nowrap' }}>Limpiar</button></th>
+                    </tr>
                   </thead>
                   <tbody>
-                    {currentSurveyInterviews.map((item) => {
-                      const alcAns = item.answers.find((a) => a.questionTitle.toLowerCase().includes('alcalde'))?.answerText || '—';
-                      const presAns = item.answers.find((a) => a.questionTitle.toLowerCase().includes('presidente'))?.answerText || '—';
+                    {paginatedInterviewRows.map((item) => {
+                      const alcAns = getInterviewAnswer(item, tableMayorVoteQuestion);
+                      const presAns = getInterviewAnswer(item, tablePresidentVoteQuestion);
 
                       return (
                         <tr key={item.id}>
@@ -3650,10 +3719,10 @@ export function App() {
                         </tr>
                       );
                     })}
-                    {!isInterviewsLoading && currentSurveyInterviews.length === 0 && (
+                    {!isInterviewsLoading && interviewTableRows.length === 0 && (
                       <tr>
                         <td colSpan={8} style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
-                          {interviewsApiError ? 'No fue posible consultar las entrevistas en la base de datos.' : 'No hay entrevistas guardadas para esta encuesta.'}
+                          {interviewsApiError ? 'No fue posible consultar las entrevistas en la base de datos.' : currentSurveyInterviews.length ? 'No hay encuestas que coincidan con los filtros.' : 'No hay entrevistas guardadas para esta encuesta.'}
                         </td>
                       </tr>
                     )}
@@ -4253,6 +4322,16 @@ export function App() {
                     </tbody>
                   </table>
                 </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '.75rem', flexWrap: 'wrap', paddingTop: '.9rem' }}>
+                <span style={{ color: 'var(--text-muted)', fontSize: '.78rem' }}>
+                  {interviewTableRows.length === 0 ? 'Mostrando 0 registros' : `Mostrando ${(interviewTablePage - 1) * 10 + 1}–${Math.min(interviewTablePage * 10, interviewTableRows.length)} de ${interviewTableRows.length}`}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem' }}>
+                  <button type="button" className="btn btn-secondary" onClick={() => setInterviewTablePage((page) => Math.max(1, page - 1))} disabled={interviewTablePage <= 1}>Anterior</button>
+                  <span aria-live="polite" style={{ fontSize: '.78rem', color: 'var(--text-muted)' }}>Página {interviewTablePage} de {interviewTablePageCount}</span>
+                  <button type="button" className="btn btn-secondary" onClick={() => setInterviewTablePage((page) => Math.min(interviewTablePageCount, page + 1))} disabled={interviewTablePage >= interviewTablePageCount}>Siguiente</button>
+                </div>
+              </div>
               </div>
             </div>
           </section>
