@@ -33,6 +33,10 @@ const interviewSchema = z.object({
 
 const listResponseSchema = z.object({ success: z.literal(true), interviews: z.array(interviewSchema) });
 const createResponseSchema = z.object({ success: z.literal(true), interview: z.object({ id: z.string(), duplicate: z.boolean() }) });
+const correctCommunityResponseSchema = z.object({
+  success: z.literal(true),
+  correction: z.object({ id: z.string(), communityId: z.string(), community: z.string() }),
+});
 
 const apiBase = `${import.meta.env.VITE_API_URL ?? ''}/api/v1`;
 
@@ -102,6 +106,16 @@ export async function createInterview(input: InterviewWriteInput): Promise<strin
 export async function deleteInterview(interviewId: string): Promise<void> {
   const response = await authenticatedFetch(`${apiBase}/interviews/${encodeURIComponent(interviewId)}`, { method: 'DELETE' });
   await parseResponse(response, z.object({ success: z.literal(true), deleted: z.literal(true) }));
+}
+
+export async function correctInterviewCommunity(interviewId: string, communityId: string): Promise<{ communityId: string; community: string }> {
+  const response = await authenticatedFetch(`${apiBase}/interviews/${encodeURIComponent(interviewId)}/community`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ communityId }),
+  });
+  const result = await parseResponse(response, correctCommunityResponseSchema);
+  return { communityId: result.correction.communityId, community: result.correction.community };
 }
 
 export async function clearSurveyInterviews(surveyId: string): Promise<ClearSurveyInterviewsResult> {

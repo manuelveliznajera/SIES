@@ -78,7 +78,7 @@ export class InterviewsService {
               i.survey_id, i.community_id, s.name AS survey_title, d.name AS department,
               m.name AS municipality, u.username AS enumerator_alias,
               u.full_name AS enumerator_name,
-              c.name AS community,
+              COALESCE(sa.community_name, c.name) AS community,
               COALESCE(i.device_info->>'ageGroup', '') AS age_group,
               COALESCE(i.device_info->>'gender', '') AS gender,
               i.latitude, i.longitude, i.gps_accuracy_meters AS accuracy,
@@ -103,6 +103,7 @@ export class InterviewsService {
        JOIN departments d ON d.id = m.department_id
        JOIN enumerators e ON e.id = i.enumerator_id
        JOIN users u ON u.id = e.user_id
+       JOIN survey_assignments sa ON sa.id = i.assignment_id
        JOIN communities c ON c.id = i.community_id
        LEFT JOIN answers a ON a.interview_id = i.id
        LEFT JOIN survey_questions q ON q.id = a.question_id
@@ -116,7 +117,7 @@ export class InterviewsService {
          WHERE aos.answer_id = a.id
        ) selected ON TRUE
        WHERE ($2::boolean OR e.user_id = $1)
-       GROUP BY i.id, s.name, d.name, m.name, u.username, u.full_name, c.name
+       GROUP BY i.id, s.name, d.name, m.name, u.username, u.full_name, sa.community_name, c.name
        ORDER BY i.interviewed_at_device DESC, i.created_at DESC`,
       [userId, canViewAll]
     );
@@ -307,6 +308,54 @@ export class InterviewsService {
       [interviewId]
     );
     return result.rows[0] ?? null;
+  }
+
+  async correctCommunity(interviewId: string, communityId: string) {
+    return withTransaction(async (client) => {
+      const currentResult = await client.query<{ survey_id: string; community_id: string; community: string; folio: string | null }>(
+        `SELECT i.survey_id, i.community_id, COALESCE(old_assignment.community_name, c.name) AS community,
+                i.device_info->>'folio' AS folio
+         FROM interviews i
+         JOIN survey_assignments old_assignment ON old_assignment.id = i.assignment_id
+         JOIN communities c ON c.id = i.community_id
+         WHERE i.id = $1
+         FOR UPDATE OF i`,
+        [interviewId]
+      );
+      const current = currentResult.rows[0];
+      if (!current) return null;
+      if (current.community_id === communityId) {
+        return { id: interviewId, surveyId: current.survey_id, folio: current.folio, oldCommunity: current.community, communityId, community: current.community };
+      }
+
+      const assignmentResult = await client.query<{ assignment_id: string; community: string }>(
+        `SELECT a.id AS assignment_id, COALESCE(a.community_name, c.name) AS community
+         FROM survey_assignments a
+         JOIN communities c ON c.id = a.community_id
+         WHERE a.survey_id = $1 AND a.community_id = $2
+         ORDER BY CASE a.status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 WHEN 'completed' THEN 2 ELSE 3 END
+         LIMIT 1
+         FOR UPDATE OF a`,
+        [current.survey_id, communityId]
+      );
+      const assignment = assignmentResult.rows[0];
+      if (!assignment) {
+        throw new InterviewSubmissionError('La comunidad elegida no está asignada a este estudio.', 400, 'COMMUNITY_NOT_ASSIGNED_TO_SURVEY');
+      }
+
+      await client.query(
+        `UPDATE interviews SET community_id = $2, assignment_id = $3 WHERE id = $1`,
+        [interviewId, communityId, assignment.assignment_id]
+      );
+      return {
+        id: interviewId,
+        surveyId: current.survey_id,
+        folio: current.folio,
+        oldCommunity: current.community,
+        communityId,
+        community: assignment.community,
+      };
+    });
   }
 
   async clearSurvey(surveyId: string) {

@@ -25,6 +25,7 @@ import {
 import {
   clearSurveyInterviews,
   createInterview as createInterviewRequest,
+  correctInterviewCommunity as correctInterviewCommunityRequest,
   deleteInterview as deleteInterviewRequest,
   listInterviews,
 } from './interviewsApi';
@@ -418,6 +419,7 @@ export function App() {
   const [isInterviewSaving, setIsInterviewSaving] = useState(false);
   const [isClearingSurveyRecords, setIsClearingSurveyRecords] = useState(false);
   const [deletingInterviewId, setDeletingInterviewId] = useState<string | null>(null);
+  const [correctingInterviewId, setCorrectingInterviewId] = useState<string | null>(null);
   const [savingAssignmentId, setSavingAssignmentId] = useState<string | null>(null);
   const [assignmentSurveyId, setAssignmentSurveyId] = useState('');
   const [newAssignedCommunityName, setNewAssignedCommunityName] = useState('');
@@ -1170,6 +1172,56 @@ export function App() {
       await Swal.fire({ icon: 'error', title: 'No se pudo eliminar', text: error instanceof Error ? error.message : 'Error al eliminar la encuesta.' });
     } finally {
       setDeletingInterviewId(null);
+    }
+  };
+
+  const handleCorrectInterviewCommunity = async (record: InterviewRecord) => {
+    if (currentUserRole !== 'admin' || !record.databaseId) return;
+    const communitiesById = new Map<string, { id: string; name: string }>();
+    for (const community of surveys.find((survey) => survey.id === record.surveyId)?.communities ?? []) {
+      communitiesById.set(community.id, { id: community.id, name: community.name });
+    }
+    // Include communities already present on saved interviews, even if their assignment reached its quota.
+    for (const savedRecord of interviews.filter((item) => item.surveyId === record.surveyId && item.communityId)) {
+      if (!communitiesById.has(savedRecord.communityId!)) {
+        communitiesById.set(savedRecord.communityId!, { id: savedRecord.communityId!, name: savedRecord.community });
+      }
+    }
+    const communities = [...communitiesById.values()];
+    if (!communities.length) {
+      await Swal.fire({ icon: 'info', title: 'No hay comunidades asignadas', text: 'Asigna comunidades a este estudio antes de corregir el registro.' });
+      return;
+    }
+    const options = Object.fromEntries(communities.map((community) => [community.id, community.name]));
+    const currentCommunityId = record.communityId && options[record.communityId]
+      ? record.communityId
+      : communities.find((community) => community.name === record.community)?.id ?? communities[0].id;
+    const result = await Swal.fire({
+      title: `Corregir comunidad · ${record.id}`,
+      text: 'Se conservarán las respuestas y los demás datos de la encuesta.',
+      input: 'select',
+      inputOptions: options,
+      inputValue: currentCommunityId,
+      inputPlaceholder: 'Selecciona la comunidad correcta',
+      showCancelButton: true,
+      confirmButtonText: 'Guardar corrección',
+      cancelButtonText: 'Cancelar',
+      confirmButtonColor: '#05a6f0',
+      inputValidator: (value) => value && options[value] ? null : 'Selecciona una comunidad asignada a este estudio.',
+    });
+    if (!result.isConfirmed || !result.value || result.value === currentCommunityId) return;
+
+    setCorrectingInterviewId(record.databaseId);
+    try {
+      const correction = await correctInterviewCommunityRequest(record.databaseId, result.value);
+      setInterviews((previous) => previous.map((item) => item.databaseId === record.databaseId
+        ? { ...item, communityId: correction.communityId, community: correction.community }
+        : item));
+      await Swal.fire({ icon: 'success', title: 'Comunidad corregida', text: `${record.id}: ${record.community} → ${correction.community}.`, timer: 2200, showConfirmButton: false });
+    } catch (error) {
+      await Swal.fire({ icon: 'error', title: 'No se pudo corregir', text: error instanceof Error ? error.message : 'Error al actualizar la comunidad.' });
+    } finally {
+      setCorrectingInterviewId(null);
     }
   };
 
@@ -3570,6 +3622,19 @@ export function App() {
                               {currentUserRole === 'admin' && (
                                 <button
                                   type="button"
+                                  onClick={() => void handleCorrectInterviewCommunity(item)}
+                                  className="btn btn-secondary"
+                                  style={{ padding: '0.3rem 0.6rem', fontSize: '0.72rem', color: '#087a55', borderColor: 'rgba(8, 122, 85, 0.28)' }}
+                                  title="Corregir comunidad de esta encuesta"
+                                  aria-label={`Corregir comunidad de encuesta ${item.id}`}
+                                  disabled={!item.databaseId || correctingInterviewId === item.databaseId || deletingInterviewId === item.databaseId}
+                                >
+                                  <Pencil size={12} /> {correctingInterviewId === item.databaseId ? 'Guardando...' : 'Corregir comunidad'}
+                                </button>
+                              )}
+                              {currentUserRole === 'admin' && (
+                                <button
+                                  type="button"
                                   onClick={() => void handleDeleteInterview(item)}
                                   className="btn btn-secondary"
                                   style={{ padding: '0.3rem 0.6rem', fontSize: '0.72rem', color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.28)' }}
@@ -4170,12 +4235,12 @@ export function App() {
                                 <Pencil size={14} />
                               </button>
                               {user.status === 'active' ? (
-                                <button type="button" className="btn btn-secondary" aria-label={`Desactivar ${user.alias}`} title="Desactivar usuario" style={{ padding: '0.35rem 0.5rem', color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.28)' }} onClick={() => void handleDeleteUser(user)} disabled={isUserSaving}>
-                                  <Trash2 size={14} />
+                                <button type="button" className="btn btn-secondary" aria-label={`Desactivar ${user.alias}`} title="Desactivar usuario; conserva sus datos e historial" style={{ padding: '0.35rem 0.55rem', color: '#b42318', borderColor: 'rgba(180, 35, 24, 0.28)', fontSize: '.72rem', whiteSpace: 'nowrap' }} onClick={() => void handleDeleteUser(user)} disabled={isUserSaving}>
+                                  <UserX size={14} /> Desactivar
                                 </button>
                               ) : (
-                                <button type="button" className="btn btn-secondary" aria-label={`Reactivar ${user.alias}`} title="Reactivar usuario" style={{ padding: '0.35rem 0.5rem', color: '#087a55', borderColor: 'rgba(8, 122, 85, 0.28)' }} onClick={() => void handleActivateUser(user)} disabled={isUserSaving}>
-                                  <UserCheck size={14} />
+                                <button type="button" className="btn btn-secondary" aria-label={`Reactivar ${user.alias}`} title="Reactivar usuario" style={{ padding: '0.35rem 0.55rem', color: '#087a55', borderColor: 'rgba(8, 122, 85, 0.28)', fontSize: '.72rem', whiteSpace: 'nowrap' }} onClick={() => void handleActivateUser(user)} disabled={isUserSaving}>
+                                  <UserCheck size={14} /> Reactivar
                                 </button>
                               )}
                             </div>

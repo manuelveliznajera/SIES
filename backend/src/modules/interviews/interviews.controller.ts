@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
-import { interviewIdSchema, interviewInputSchema } from './interviews.validators';
+import { correctInterviewCommunitySchema, interviewIdSchema, interviewInputSchema } from './interviews.validators';
 import { InterviewSubmissionError, interviewsService } from './interviews.service';
 import { publishInterviewCreated } from '../surveys/surveys.events';
 import { writeAuditEvent } from '../../services/observability';
@@ -76,6 +76,35 @@ export async function deleteInterview(req: Request, res: Response, next: NextFun
   } catch (error) {
     if (error instanceof ZodError) {
       res.status(400).json({ success: false, message: 'El identificador de encuesta no es válido.', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function correctInterviewCommunity(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const interviewId = interviewIdSchema.parse(req.params.interviewId);
+    const { communityId } = correctInterviewCommunitySchema.parse(req.body);
+    const correction = await interviewsService.correctCommunity(interviewId, communityId);
+    if (!correction) {
+      res.status(404).json({ success: false, message: 'No se encontró la encuesta registrada.', code: 'INTERVIEW_NOT_FOUND' });
+      return;
+    }
+    await writeAuditEvent(req, {
+      action: 'interview.community_corrected',
+      entityType: 'interview',
+      entityId: interviewId,
+      changes: { folio: correction.folio, surveyId: correction.surveyId, oldCommunity: correction.oldCommunity, newCommunity: correction.community },
+    });
+    res.status(200).json({ success: true, correction });
+  } catch (error) {
+    if (error instanceof ZodError) {
+      res.status(400).json({ success: false, message: 'El identificador o la comunidad no son válidos.', code: 'VALIDATION_ERROR' });
+      return;
+    }
+    if (error instanceof InterviewSubmissionError) {
+      res.status(error.status).json({ success: false, message: error.message, code: error.code });
       return;
     }
     next(error);

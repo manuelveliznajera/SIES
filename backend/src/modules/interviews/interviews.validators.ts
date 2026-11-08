@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const interviewIdSchema = z.string().uuid();
+export const correctInterviewCommunitySchema = z.object({ communityId: z.string().uuid() });
 
 export const interviewInputSchema = z.object({
   deviceUuid: z.string().uuid(),
